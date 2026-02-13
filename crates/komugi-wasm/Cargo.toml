@@ -1,0 +1,23 @@
+[package]
+name = "komugi-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+komugi-core = { path = "../komugi-core" }
+komugi-engine = { path = "../komugi-engine" }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

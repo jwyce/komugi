@@ -1,0 +1,414 @@
+import argparse
+import csv
+import importlib
+import json
+import math
+import random
+import re
+from pathlib import Path
+from typing import Any
+
+np = importlib.import_module("numpy")
+torch = importlib.import_module("torch")
+F = importlib.import_module("torch.nn.functional")
+_torch_utils_data = importlib.import_module("torch.utils.data")
+DataLoader = _torch_utils_data.DataLoader
+Dataset = _torch_utils_data.Dataset
+
+from model import (
+    NUM_INPUT_PLANES,
+    PIECE_KANJI_TO_INDEX,
+    POLICY_SIZE,
+    GungiNet,
+    board_move_to_index,
+    drop_move_to_index,
+)
+
+
+COORD_RE = re.compile(r"\((\d+)-(\d+)-(\d+)\)")
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def san_to_policy_index(san: str) -> int | None:
+    clean = san.strip()
+    clean = clean.rstrip("#=")
+    if clean.endswith("終"):
+        clean = clean[:-1]
+    if not clean:
+        return None
+
+    is_drop = clean.startswith("新")
+    if is_drop:
+        clean = clean[1:]
+    if not clean:
+        return None
+
+    piece_kanji = clean[0]
+    piece_type_idx = PIECE_KANJI_TO_INDEX.get(piece_kanji)
+    if piece_type_idx is None:
+        return None
+
+    coords = [(int(r), int(f), int(t)) for r, f, t in COORD_RE.findall(clean)]
+    if not coords:
+        return None
+
+    if is_drop or len(coords) == 1:
+        to_rank, to_file, _ = coords[-1]
+        try:
+            return drop_move_to_index(piece_type_idx, to_rank, to_file)
+        except ValueError:
+            return None
+
+    from_rank, from_file, _ = coords[0]
+    to_rank, to_file, _ = coords[-1]
+    try:
+        return board_move_to_index(from_rank, from_file, to_rank, to_file)
+    except ValueError:
+        return None
+
+
+def parse_policy_entry(entry: Any) -> tuple[str, float] | None:
+    if isinstance(entry, list) and len(entry) == 2:
+        san, prob = entry
+    elif isinstance(entry, tuple) and len(entry) == 2:
+        san, prob = entry
+    elif isinstance(entry, dict):
+        san = entry.get("san")
+        prob = entry.get("prob")
+    else:
+        return None
+
+    if not isinstance(san, str):
+        return None
+    if prob is None:
+        return None
+    try:
+        prob_value = float(prob)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(prob_value) or prob_value < 0:
+        return None
+    return san, prob_value
+
+
+class SelfPlayDataset(Dataset):
+    def __init__(self, jsonl_path: str) -> None:
+        self.records: list[dict] = []
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"invalid JSON at line {line_num}: {exc}") from exc
+                self.records.append(record)
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int):
+        record = self.records[idx]
+
+        encoding = torch.tensor(record["encoding"], dtype=torch.float32).reshape(
+            NUM_INPUT_PLANES, 9, 9
+        )
+
+        policy_target = torch.zeros(POLICY_SIZE, dtype=torch.float32)
+        for raw_entry in record.get("policy", []):
+            parsed = parse_policy_entry(raw_entry)
+            if parsed is None:
+                continue
+            san, prob = parsed
+            policy_index = san_to_policy_index(san)
+            if policy_index is None:
+                continue
+            policy_target[policy_index] += prob
+
+        total_prob = policy_target.sum()
+        if total_prob > 0:
+            policy_target /= total_prob
+
+        value_target = torch.tensor([float(record["outcome"])], dtype=torch.float32)
+        return encoding, policy_target, value_target
+
+
+def train_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+):
+    model.train()
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
+
+    for encoding, policy_target, value_target in loader:
+        encoding = encoding.to(device)
+        policy_target = policy_target.to(device)
+        value_target = value_target.to(device)
+
+        policy_logits, value = model(encoding)
+
+        policy_log_probs = torch.log_softmax(policy_logits, dim=1)
+        policy_loss = -(policy_target * policy_log_probs).sum(dim=1).mean()
+        value_loss = F.mse_loss(value.squeeze(1), value_target.squeeze(1))
+        loss = policy_loss + value_loss
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        total_policy_loss += policy_loss.item()
+        total_value_loss += value_loss.item()
+
+    denom = max(len(loader), 1)
+    return total_policy_loss / denom, total_value_loss / denom
+
+
+def evaluate(
+    model,
+    loader,
+    device,
+):
+    model.eval()
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
+
+    with torch.no_grad():
+        for encoding, policy_target, value_target in loader:
+            encoding = encoding.to(device)
+            policy_target = policy_target.to(device)
+            value_target = value_target.to(device)
+
+            policy_logits, value = model(encoding)
+            policy_log_probs = torch.log_softmax(policy_logits, dim=1)
+            policy_loss = -(policy_target * policy_log_probs).sum(dim=1).mean()
+            value_loss = F.mse_loss(value.squeeze(1), value_target.squeeze(1))
+
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+
+    denom = max(len(loader), 1)
+    return total_policy_loss / denom, total_value_loss / denom
+
+
+def save_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    epoch: int,
+    output_dir: Path,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / f"model_epoch_{epoch}.pt"
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+        },
+        checkpoint_path,
+    )
+    return checkpoint_path
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Train Gungi policy+value model from self-play JSONL"
+    )
+    parser.add_argument("--data", required=True, help="Path to self-play JSONL file")
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--num-blocks", type=int, default=10)
+    parser.add_argument("--channels", type=int, default=128)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    parser.add_argument("--save-every", type=int, default=10)
+    parser.add_argument("--output-dir", default="training/checkpoints")
+    parser.add_argument("--val-split", type=float, default=0.05)
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Path to checkpoint .pt file to resume/warm-start from",
+    )
+    parser.add_argument(
+        "--metrics-file",
+        default=None,
+        help="Path to CSV file for metrics logging (default: {output_dir}/metrics.csv)",
+    )
+    parser.add_argument(
+        "--tensorboard",
+        action="store_true",
+        help="Enable TensorBoard logging",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    set_seed(args.seed)
+
+    dataset = SelfPlayDataset(args.data)
+    if len(dataset) == 0:
+        raise ValueError("dataset is empty")
+
+    val_size = int(len(dataset) * args.val_split)
+    train_size = len(dataset) - val_size
+    if train_size <= 0:
+        train_size = len(dataset)
+        val_size = 0
+
+    if val_size > 0:
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            dataset, [train_size, val_size]
+        )
+    else:
+        train_dataset = dataset
+        val_dataset = None
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+    device = torch.device(args.device)
+    model = GungiNet(num_blocks=args.num_blocks, channels=args.channels).to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_file = args.metrics_file
+    if metrics_file is None:
+        metrics_file = str(output_dir / "metrics.csv")
+    metrics_file = Path(metrics_file)
+
+    csv_file = None
+    csv_writer = None
+    metrics_file_exists = metrics_file.exists() and metrics_file.stat().st_size > 0
+
+    writer = None
+    if args.tensorboard:
+        tb_log_dir = output_dir / "tb_logs"
+        SummaryWriter = importlib.import_module("torch.utils.tensorboard").SummaryWriter
+        writer = SummaryWriter(log_dir=str(tb_log_dir))
+
+    start_epoch = 1
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        resumed_epoch = checkpoint.get("epoch", 0)
+        start_epoch = resumed_epoch + 1
+        print(f"resumed from {args.resume} (epoch {resumed_epoch})")
+
+    csv_file = open(metrics_file, "a" if metrics_file_exists else "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    if not metrics_file_exists:
+        csv_writer.writerow(
+            [
+                "epoch",
+                "train_policy_loss",
+                "train_value_loss",
+                "val_policy_loss",
+                "val_value_loss",
+                "lr",
+            ]
+        )
+        csv_file.flush()
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        train_policy_loss, train_value_loss = train_epoch(
+            model, train_loader, optimizer, device
+        )
+        scheduler.step()
+
+        message = (
+            f"epoch={epoch} "
+            f"train_policy_loss={train_policy_loss:.6f} "
+            f"train_value_loss={train_value_loss:.6f} "
+            f"lr={scheduler.get_last_lr()[0]:.8f}"
+        )
+
+        val_policy_loss = None
+        val_value_loss = None
+        if val_loader is not None:
+            val_policy_loss, val_value_loss = evaluate(model, val_loader, device)
+            message = (
+                message
+                + f" val_policy_loss={val_policy_loss:.6f}"
+                + f" val_value_loss={val_value_loss:.6f}"
+            )
+
+        print(message)
+
+        val_policy_loss_val = val_policy_loss if val_policy_loss is not None else ""
+        val_value_loss_val = val_value_loss if val_value_loss is not None else ""
+        lr = scheduler.get_last_lr()[0]
+        csv_writer.writerow(
+            [
+                epoch,
+                train_policy_loss,
+                train_value_loss,
+                val_policy_loss_val,
+                val_value_loss_val,
+                lr,
+            ]
+        )
+        csv_file.flush()
+
+        if writer is not None:
+            writer.add_scalar("train/policy_loss", train_policy_loss, epoch)
+            writer.add_scalar("train/value_loss", train_value_loss, epoch)
+            writer.add_scalar("lr", lr, epoch)
+            if val_policy_loss is not None:
+                writer.add_scalar("val/policy_loss", val_policy_loss, epoch)
+                writer.add_scalar("val/value_loss", val_value_loss, epoch)
+
+        if epoch % args.save_every == 0:
+            path = save_checkpoint(model, optimizer, scheduler, epoch, output_dir)
+            print(f"saved checkpoint: {path}")
+
+    csv_file.close()
+    if writer is not None:
+        writer.close()
+
+    final_path = save_checkpoint(model, optimizer, scheduler, args.epochs, output_dir)
+    print(f"saved final checkpoint: {final_path}")
+
+
+if __name__ == "__main__":
+    main()

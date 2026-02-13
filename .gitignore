@@ -1,0 +1,26 @@
+# Rust
+/target/
+
+# Self-play data (large, regenerated)
+/data/
+
+# Trained models (downloaded from cloud)
+/models/
+
+# Python
+__pycache__/
+*.pyc
+training/checkpoints/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Agent internals
+.sisyphus/
+BENCHMARK_BASELINES.md
+
+# OS
+.DS_Store

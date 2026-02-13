@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/komugi-core",
+    "crates/komugi-engine",
+    "crates/komugi-wasm",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["jwyce"]
+license = "MIT"

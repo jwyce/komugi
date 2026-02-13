@@ -1,0 +1,17 @@
+[
+  {
+    "fen": "3img3/1s2n2s1/d1fwdwf1d/9/9/9/D1FWDWF1D/1S2N2S1/3GMI3 J2N2R2D1/j2n2r2d1 w 0 - 1",
+    "depth": 1,
+    "nodes": 154
+  },
+  {
+    "fen": "3img3/1s2n2s1/d1fwdwf1d/9/9/9/D1FWDWF1D/1S2N2S1/3GMI3 J2N2R2D1/j2n2r2d1 w 0 - 1",
+    "depth": 2,
+    "nodes": 23716
+  },
+  {
+    "fen": "3img3/1s2n2s1/d1fwdwf1d/9/9/9/D1FWDWF1D/1S2N2S1/3GMI3 J2N2R2D1/j2n2r2d1 w 0 - 1",
+    "depth": 3,
+    "nodes": 3613281
+  }
+]
