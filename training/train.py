@@ -1,5 +1,6 @@
 import argparse
 import csv
+import glob
 import importlib
 import json
 import math
@@ -26,6 +27,38 @@ from model import (
 
 
 COORD_RE = re.compile(r"\((\d+)-(\d+)-(\d+)\)")
+
+
+def build_mirror_permutation() -> list[int]:
+    perm = list(range(POLICY_SIZE))
+    board_size = 9
+    num_squares = board_size * board_size
+    drop_offset = num_squares * num_squares
+
+    # Board move index: from_sq * 81 + to_sq.
+    for from_rank in range(board_size):
+        for from_file in range(board_size):
+            for to_rank in range(board_size):
+                for to_file in range(board_size):
+                    from_sq = from_rank * board_size + from_file
+                    to_sq = to_rank * board_size + to_file
+                    orig_idx = from_sq * num_squares + to_sq
+                    mir_from_sq = from_rank * board_size + (board_size - 1 - from_file)
+                    mir_to_sq = to_rank * board_size + (board_size - 1 - to_file)
+                    mir_idx = mir_from_sq * num_squares + mir_to_sq
+                    perm[orig_idx] = mir_idx
+
+    # Drop move index: 6561 + piece * 81 + to_sq.
+    for piece in range(14):
+        for to_rank in range(board_size):
+            for to_file in range(board_size):
+                to_sq = to_rank * board_size + to_file
+                orig_idx = drop_offset + piece * num_squares + to_sq
+                mir_to_sq = to_rank * board_size + (board_size - 1 - to_file)
+                mir_idx = drop_offset + piece * num_squares + mir_to_sq
+                perm[orig_idx] = mir_idx
+
+    return perm
 
 
 def set_seed(seed: int) -> None:
@@ -98,18 +131,23 @@ def parse_policy_entry(entry: Any) -> tuple[str, float] | None:
 
 
 class SelfPlayDataset(Dataset):
-    def __init__(self, jsonl_path: str) -> None:
+    def __init__(self, jsonl_paths: list[str], augment_symmetry: bool = True) -> None:
         self.records: list[dict] = []
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"invalid JSON at line {line_num}: {exc}") from exc
-                self.records.append(record)
+        self.augment_symmetry = augment_symmetry
+        self.mirror_perm = torch.tensor(build_mirror_permutation(), dtype=torch.long)
+        for jsonl_path in jsonl_paths:
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                for line_num, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            f"invalid JSON at {jsonl_path}:{line_num}: {exc}"
+                        ) from exc
+                    self.records.append(record)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -135,6 +173,10 @@ class SelfPlayDataset(Dataset):
         total_prob = policy_target.sum()
         if total_prob > 0:
             policy_target /= total_prob
+
+        if self.augment_symmetry and random.random() < 0.5:
+            encoding = encoding.flip(2)
+            policy_target = policy_target[self.mirror_perm]
 
         value_target = torch.tensor([float(record["outcome"])], dtype=torch.float32)
         return encoding, policy_target, value_target
@@ -225,7 +267,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train Gungi policy+value model from self-play JSONL"
     )
-    parser.add_argument("--data", required=True, help="Path to self-play JSONL file")
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="Self-play JSONL path(s): single file, comma-separated, or glob",
+    )
+    parser.add_argument(
+        "--augment-symmetry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable random left-right symmetry augmentation",
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -262,7 +314,18 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     set_seed(args.seed)
 
-    dataset = SelfPlayDataset(args.data)
+    data_patterns = [part.strip() for part in args.data.split(",") if part.strip()]
+    data_paths: list[str] = []
+    for pattern in data_patterns:
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            data_paths.extend(matches)
+        else:
+            data_paths.append(pattern)
+    data_paths = list(dict.fromkeys(data_paths))
+
+    dataset = SelfPlayDataset(data_paths, augment_symmetry=args.augment_symmetry)
+    print(f"loaded {len(data_paths)} file(s), {len(dataset)} positions")
     if len(dataset) == 0:
         raise ValueError("dataset is empty")
 
