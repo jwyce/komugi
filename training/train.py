@@ -4,6 +4,7 @@ import glob
 import importlib
 import json
 import math
+import os
 import random
 import re
 from pathlib import Path
@@ -15,6 +16,11 @@ F = importlib.import_module("torch.nn.functional")
 _torch_utils_data = importlib.import_module("torch.utils.data")
 DataLoader = _torch_utils_data.DataLoader
 Dataset = _torch_utils_data.Dataset
+DistributedSampler = importlib.import_module(
+    "torch.utils.data.distributed"
+).DistributedSampler
+DDP = importlib.import_module("torch.nn.parallel").DistributedDataParallel
+dist = importlib.import_module("torch.distributed")
 
 from model import (
     NUM_INPUT_PLANES,
@@ -24,6 +30,18 @@ from model import (
     board_move_to_index,
     drop_move_to_index,
 )
+
+
+def is_distributed() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def local_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", 0))
+
+
+def is_main_process() -> bool:
+    return local_rank() == 0
 
 
 COORD_RE = re.compile(r"\((\d+)-(\d+)-(\d+)\)")
@@ -131,54 +149,48 @@ def parse_policy_entry(entry: Any) -> tuple[str, float] | None:
 
 
 class SelfPlayDataset(Dataset):
-    def __init__(self, jsonl_paths: list[str], augment_symmetry: bool = True) -> None:
-        self.records: list[dict] = []
+    def __init__(self, preprocessed_dir: str, augment_symmetry: bool = True) -> None:
         self.augment_symmetry = augment_symmetry
         self.mirror_perm = torch.tensor(build_mirror_permutation(), dtype=torch.long)
-        for jsonl_path in jsonl_paths:
-            with open(jsonl_path, "r", encoding="utf-8") as f:
-                for line_num, line in enumerate(f, start=1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(
-                            f"invalid JSON at {jsonl_path}:{line_num}: {exc}"
-                        ) from exc
-                    self.records.append(record)
+        meta = np.load(f"{preprocessed_dir}/meta.npy")
+        n = int(meta[0])
+        enc_size = int(meta[1])
+        pol_size = int(meta[2])
+        self.encodings = np.memmap(
+            f"{preprocessed_dir}/encodings.npy",
+            dtype="float32",
+            mode="r",
+            shape=(n, enc_size),
+        )
+        self.policies = np.memmap(
+            f"{preprocessed_dir}/policies.npy",
+            dtype="float32",
+            mode="r",
+            shape=(n, pol_size),
+        )
+        self.values = np.memmap(
+            f"{preprocessed_dir}/values.npy",
+            dtype="float32",
+            mode="r",
+            shape=(n,),
+        )
+        self._len = n
+        print(f"loaded preprocessed data: {n} positions from {preprocessed_dir}")
 
     def __len__(self) -> int:
-        return len(self.records)
+        return self._len
 
     def __getitem__(self, idx: int):
-        record = self.records[idx]
-
-        encoding = torch.tensor(record["encoding"], dtype=torch.float32).reshape(
+        encoding = torch.from_numpy(self.encodings[idx].copy()).reshape(
             NUM_INPUT_PLANES, 9, 9
         )
-
-        policy_target = torch.zeros(POLICY_SIZE, dtype=torch.float32)
-        for raw_entry in record.get("policy", []):
-            parsed = parse_policy_entry(raw_entry)
-            if parsed is None:
-                continue
-            san, prob = parsed
-            policy_index = san_to_policy_index(san)
-            if policy_index is None:
-                continue
-            policy_target[policy_index] += prob
-
-        total_prob = policy_target.sum()
-        if total_prob > 0:
-            policy_target /= total_prob
+        policy_target = torch.from_numpy(self.policies[idx].copy())
+        value_target = torch.tensor([self.values[idx]], dtype=torch.float32)
 
         if self.augment_symmetry and random.random() < 0.5:
             encoding = encoding.flip(2)
             policy_target = policy_target[self.mirror_perm]
 
-        value_target = torch.tensor([float(record["outcome"])], dtype=torch.float32)
         return encoding, policy_target, value_target
 
 
@@ -208,8 +220,12 @@ def train_epoch(
         loss.backward()
         optimizer.step()
 
-        total_policy_loss += policy_loss.item()
-        total_value_loss += value_loss.item()
+        pl = policy_loss.item()
+        vl = value_loss.item()
+        if not (math.isfinite(pl) and math.isfinite(vl)):
+            raise RuntimeError(f"NaN/Inf detected: policy_loss={pl}, value_loss={vl}")
+        total_policy_loss += pl
+        total_value_loss += vl
 
     denom = max(len(loader), 1)
     return total_policy_loss / denom, total_value_loss / denom
@@ -270,7 +286,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data",
         required=True,
-        help="Self-play JSONL path(s): single file, comma-separated, or glob",
+        help="Preprocessed data directory (output of preprocess.py)",
     )
     parser.add_argument(
         "--augment-symmetry",
@@ -284,7 +300,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--num-blocks", type=int, default=10)
     parser.add_argument("--channels", type=int, default=128)
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
@@ -312,20 +328,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+
+    use_ddp = "LOCAL_RANK" in os.environ
+    if use_ddp:
+        dist.init_process_group(backend="nccl")
+        rank = local_rank()
+        torch.cuda.set_device(rank)
+        device = torch.device(f"cuda:{rank}")
+    else:
+        device = torch.device(args.device)
+
     set_seed(args.seed)
 
-    data_patterns = [part.strip() for part in args.data.split(",") if part.strip()]
-    data_paths: list[str] = []
-    for pattern in data_patterns:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            data_paths.extend(matches)
-        else:
-            data_paths.append(pattern)
-    data_paths = list(dict.fromkeys(data_paths))
-
-    dataset = SelfPlayDataset(data_paths, augment_symmetry=args.augment_symmetry)
-    print(f"loaded {len(data_paths)} file(s), {len(dataset)} positions")
+    dataset = SelfPlayDataset(args.data, augment_symmetry=args.augment_symmetry)
+    if is_main_process():
+        print(f"loaded {len(dataset)} positions")
     if len(dataset) == 0:
         raise ValueError("dataset is empty")
 
@@ -343,26 +360,34 @@ def main() -> None:
         train_dataset = dataset
         val_dataset = None
 
+    train_sampler = DistributedSampler(train_dataset) if use_ddp else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
 
     val_loader = None
     if val_dataset is not None:
+        val_sampler = (
+            DistributedSampler(val_dataset, shuffle=False) if use_ddp else None
+        )
         val_loader = DataLoader(
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
+            sampler=val_sampler,
             num_workers=args.num_workers,
             pin_memory=torch.cuda.is_available(),
         )
 
-    device = torch.device(args.device)
     model = GungiNet(num_blocks=args.num_blocks, channels=args.channels).to(device)
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank()])
+
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
@@ -381,7 +406,7 @@ def main() -> None:
     metrics_file_exists = metrics_file.exists() and metrics_file.stat().st_size > 0
 
     writer = None
-    if args.tensorboard:
+    if args.tensorboard and is_main_process():
         tb_log_dir = output_dir / "tb_logs"
         SummaryWriter = importlib.import_module("torch.utils.tensorboard").SummaryWriter
         writer = SummaryWriter(log_dir=str(tb_log_dir))
@@ -389,88 +414,103 @@ def main() -> None:
     start_epoch = 1
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        raw_model = model.module if use_ddp else model
+        raw_model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         resumed_epoch = checkpoint.get("epoch", 0)
         start_epoch = resumed_epoch + 1
-        print(f"resumed from {args.resume} (epoch {resumed_epoch})")
+        if is_main_process():
+            print(f"resumed from {args.resume} (epoch {resumed_epoch})")
 
-    csv_file = open(metrics_file, "a" if metrics_file_exists else "w", newline="")
-    csv_writer = csv.writer(csv_file)
-    if not metrics_file_exists:
-        csv_writer.writerow(
-            [
-                "epoch",
-                "train_policy_loss",
-                "train_value_loss",
-                "val_policy_loss",
-                "val_value_loss",
-                "lr",
-            ]
-        )
-        csv_file.flush()
+    if is_main_process():
+        csv_file = open(metrics_file, "a" if metrics_file_exists else "w", newline="")
+        csv_writer = csv.writer(csv_file)
+        if not metrics_file_exists:
+            csv_writer.writerow(
+                [
+                    "epoch",
+                    "train_policy_loss",
+                    "train_value_loss",
+                    "val_policy_loss",
+                    "val_value_loss",
+                    "lr",
+                ]
+            )
+            csv_file.flush()
 
     for epoch in range(start_epoch, args.epochs + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
         train_policy_loss, train_value_loss = train_epoch(
             model, train_loader, optimizer, device
         )
         scheduler.step()
 
-        message = (
-            f"epoch={epoch} "
-            f"train_policy_loss={train_policy_loss:.6f} "
-            f"train_value_loss={train_value_loss:.6f} "
-            f"lr={scheduler.get_last_lr()[0]:.8f}"
-        )
-
         val_policy_loss = None
         val_value_loss = None
         if val_loader is not None:
             val_policy_loss, val_value_loss = evaluate(model, val_loader, device)
+
+        if is_main_process():
             message = (
-                message
-                + f" val_policy_loss={val_policy_loss:.6f}"
-                + f" val_value_loss={val_value_loss:.6f}"
+                f"epoch={epoch} "
+                f"train_policy_loss={train_policy_loss:.6f} "
+                f"train_value_loss={train_value_loss:.6f} "
+                f"lr={scheduler.get_last_lr()[0]:.8f}"
             )
-
-        print(message)
-
-        val_policy_loss_val = val_policy_loss if val_policy_loss is not None else ""
-        val_value_loss_val = val_value_loss if val_value_loss is not None else ""
-        lr = scheduler.get_last_lr()[0]
-        csv_writer.writerow(
-            [
-                epoch,
-                train_policy_loss,
-                train_value_loss,
-                val_policy_loss_val,
-                val_value_loss_val,
-                lr,
-            ]
-        )
-        csv_file.flush()
-
-        if writer is not None:
-            writer.add_scalar("train/policy_loss", train_policy_loss, epoch)
-            writer.add_scalar("train/value_loss", train_value_loss, epoch)
-            writer.add_scalar("lr", lr, epoch)
             if val_policy_loss is not None:
-                writer.add_scalar("val/policy_loss", val_policy_loss, epoch)
-                writer.add_scalar("val/value_loss", val_value_loss, epoch)
+                message += (
+                    f" val_policy_loss={val_policy_loss:.6f}"
+                    f" val_value_loss={val_value_loss:.6f}"
+                )
+            print(message)
 
-        if epoch % args.save_every == 0:
-            path = save_checkpoint(model, optimizer, scheduler, epoch, output_dir)
-            print(f"saved checkpoint: {path}")
+            val_policy_loss_val = val_policy_loss if val_policy_loss is not None else ""
+            val_value_loss_val = val_value_loss if val_value_loss is not None else ""
+            lr = scheduler.get_last_lr()[0]
+            csv_writer.writerow(
+                [
+                    epoch,
+                    train_policy_loss,
+                    train_value_loss,
+                    val_policy_loss_val,
+                    val_value_loss_val,
+                    lr,
+                ]
+            )
+            csv_file.flush()
 
-    csv_file.close()
-    if writer is not None:
-        writer.close()
+            if writer is not None:
+                writer.add_scalar("train/policy_loss", train_policy_loss, epoch)
+                writer.add_scalar("train/value_loss", train_value_loss, epoch)
+                writer.add_scalar("lr", lr, epoch)
+                if val_policy_loss is not None:
+                    writer.add_scalar("val/policy_loss", val_policy_loss, epoch)
+                    writer.add_scalar("val/value_loss", val_value_loss, epoch)
 
-    final_path = save_checkpoint(model, optimizer, scheduler, args.epochs, output_dir)
-    print(f"saved final checkpoint: {final_path}")
+            if epoch % args.save_every == 0:
+                raw_model = model.module if use_ddp else model
+                path = save_checkpoint(
+                    raw_model, optimizer, scheduler, epoch, output_dir
+                )
+                print(f"saved checkpoint: {path}")
+
+    if is_main_process():
+        csv_file.close()
+        if writer is not None:
+            writer.close()
+        raw_model = model.module if use_ddp else model
+        final_path = save_checkpoint(
+            raw_model, optimizer, scheduler, args.epochs, output_dir
+        )
+        print(f"saved final checkpoint: {final_path}")
+
+    if use_ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

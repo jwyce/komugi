@@ -1,5 +1,5 @@
+use std::cell::UnsafeCell;
 use std::path::Path;
-use std::sync::Mutex;
 
 use komugi_core::{Color, Evaluator, Move, Policy, Position, Score};
 use ort::session::Session;
@@ -10,14 +10,22 @@ use crate::encoding::{
 };
 
 pub struct NeuralPolicy {
-    session: Mutex<Session>,
+    session: UnsafeCell<Session>,
 }
+
+// Safety: each NeuralPolicy is created per-thread in selfplay. A single
+// thread owns exclusive access to its session — no concurrent &mut aliases.
+unsafe impl Send for NeuralPolicy {}
+unsafe impl Sync for NeuralPolicy {}
 
 impl NeuralPolicy {
     pub fn from_file(model_path: impl AsRef<Path>) -> Result<Self, ort::Error> {
-        let session = Session::builder()?.commit_from_file(model_path)?;
+        let session = Session::builder()?
+            .with_intra_threads(1)?
+            .with_inter_threads(1)?
+            .commit_from_file(model_path)?;
         Ok(Self {
-            session: Mutex::new(session),
+            session: UnsafeCell::new(session),
         })
     }
 
@@ -29,11 +37,8 @@ impl NeuralPolicy {
             Tensor::<f32>::from_array((vec![1, NUM_PLANES, BOARD_SIZE, BOARD_SIZE], encoding))
                 .expect("encoding size must match tensor shape");
 
-        let mut session = self
-            .session
-            .lock()
-            .expect("failed to lock ONNX session for inference");
-
+        // Safety: only one thread ever calls run_inference on this instance
+        let session = unsafe { &mut *self.session.get() };
         let outputs = session
             .run(ort::inputs![input])
             .expect("ONNX inference failed");

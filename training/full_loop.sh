@@ -16,6 +16,9 @@ BATCH_SIZE=256
 LR=0.001
 MAX_MOVES=300
 THREADS=$(nproc)
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+NUM_GPUS=${NUM_GPUS:-1}
+[ "$NUM_GPUS" -lt 1 ] && NUM_GPUS=1
 
 PHASES=(
     "beginner:10"
@@ -34,7 +37,7 @@ done
 echo "================================================================"
 echo "KOMUGI FULL TRAINING PIPELINE"
 echo "================================================================"
-echo "Games/gen: $GAMES | Sims: $SIMS | Epochs: $EPOCHS | Threads: $THREADS"
+echo "Games/gen: $GAMES | Sims: $SIMS | Epochs: $EPOCHS | Threads: $THREADS | GPUs: $NUM_GPUS"
 echo "Phases: ${PHASES[*]}"
 echo "Total generations: $TOTAL_GENS"
 echo "================================================================"
@@ -42,12 +45,23 @@ echo ""
 
 GLOBAL_GEN=0
 PREV_MODEL=""
+PREV_PHASE=""
 
 run_generation() {
     local mode="$1"
     local gen_in_phase="$2"
     local phase_name="$3"
     local gen_label="${phase_name}_gen${gen_in_phase}"
+
+    if [ -f "$MODELS_DIR/${gen_label}.done" ]; then
+        echo "[$gen_label] Already complete (found .done marker), skipping..."
+        local done_model="$MODELS_DIR/${gen_label}.onnx"
+        if [ -f "$done_model" ]; then
+            PREV_MODEL="$done_model"
+        fi
+        GLOBAL_GEN=$((GLOBAL_GEN + 1))
+        return
+    fi
 
     echo ""
     echo "=========================================="
@@ -82,10 +96,10 @@ run_generation() {
     echo "Self-play done: $positions positions in ${sp_elapsed}s"
 
     local resume_flag=""
-    if [ -n "$PREV_MODEL" ]; then
-        local prev_ckpt_dir
-        prev_ckpt_dir=$(ls -dt "$CHECKPOINTS_DIR"/*/model_epoch_*.pt 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
-        if [ -n "$prev_ckpt_dir" ]; then
+    if [ -n "$PREV_MODEL" ] && [ "$gen_in_phase" -gt 0 ]; then
+        local prev_gen_label="${phase_name}_gen$((gen_in_phase - 1))"
+        local prev_ckpt_dir="$CHECKPOINTS_DIR/$prev_gen_label"
+        if [ -d "$prev_ckpt_dir" ]; then
             local prev_ckpt
             prev_ckpt=$(ls -t "$prev_ckpt_dir"/model_epoch_*.pt 2>/dev/null | head -1 || true)
             if [ -n "$prev_ckpt" ] && [ -f "$prev_ckpt" ]; then
@@ -103,10 +117,17 @@ run_generation() {
         [ -f "$prev_data" ] && data_window="$prev_data,$data_window"
     done
 
-    echo "Training $EPOCHS epochs on $positions positions (window: $data_window)..."
+    local preprocessed_dir="$DATA_DIR/${gen_label}_preprocessed"
+    echo "Preprocessing $positions positions (window: $data_window)..."
+    local prep_start=$SECONDS
+    python preprocess.py "$data_window" "$preprocessed_dir"
+    local prep_elapsed=$((SECONDS - prep_start))
+    echo "Preprocessing done in ${prep_elapsed}s"
+
+    echo "Training $EPOCHS epochs on $positions positions (${NUM_GPUS} GPUs)..."
     local train_start=$SECONDS
-    python train.py \
-        --data "$data_window" \
+    torchrun --standalone --nproc_per_node="$NUM_GPUS" train.py \
+        --data "$preprocessed_dir" \
         --epochs "$EPOCHS" \
         --batch-size "$BATCH_SIZE" \
         --lr "$LR" \
@@ -165,7 +186,27 @@ run_generation() {
         PREV_MODEL="$output_model"
     fi
 
+    touch "$MODELS_DIR/${gen_label}.done"
     GLOBAL_GEN=$((GLOBAL_GEN + 1))
+
+    local stale_gen=$((gen_in_phase - window_size))
+    if [ "$stale_gen" -ge 0 ]; then
+        local stale_data="$DATA_DIR/${phase_name}_gen${stale_gen}.jsonl"
+        if [ -f "$stale_data" ]; then
+            echo "Cleaning up stale data: $stale_data ($(du -h "$stale_data" | cut -f1))"
+            rm -f "$stale_data"
+        fi
+        local stale_prep="$DATA_DIR/${phase_name}_gen${stale_gen}_preprocessed"
+        if [ -d "$stale_prep" ]; then
+            echo "Cleaning up stale preprocessed: $stale_prep"
+            rm -rf "$stale_prep"
+        fi
+    fi
+    # Also clean current gen's preprocessed dir (no longer needed after training)
+    if [ -d "$preprocessed_dir" ]; then
+        echo "Cleaning up preprocessed dir: $preprocessed_dir"
+        rm -rf "$preprocessed_dir"
+    fi
 
     echo "[$gen_label] Complete: $(du -h "$output_model" | cut -f1) model, ${sp_elapsed}s self-play + ${train_elapsed}s training"
 }
@@ -180,6 +221,13 @@ for phase in "${PHASES[@]}"; do
     echo "################################################################"
     echo "PHASE: $mode ($gens generations)"
     echo "################################################################"
+
+    if [ -n "$PREV_PHASE" ] && [ "$PREV_PHASE" != "$mode" ]; then
+        echo "Cleaning up previous phase data ($PREV_PHASE)..."
+        rm -f "$DATA_DIR"/${PREV_PHASE}_gen*.jsonl "$DATA_DIR"/${PREV_PHASE}_gen*.pgn
+        rm -rf "$DATA_DIR"/${PREV_PHASE}_gen*_preprocessed
+    fi
+    PREV_PHASE="$mode"
 
     for g in $(seq 0 $((gens - 1))); do
         run_generation "$mode" "$g" "$mode"

@@ -8,16 +8,12 @@ use komugi_engine::mcts::{HeuristicPolicy, MctsConfig};
 use komugi_engine::NeuralPolicy;
 use komugi_engine::{play_game, GameRecord, SelfPlayConfig};
 
-#[cfg(feature = "neural")]
-fn load_policy(model_path: Option<&str>) -> Arc<dyn Policy> {
-    match model_path {
-        Some(path) => Arc::new(NeuralPolicy::from_file(path).expect("failed to load model")),
-        None => Arc::new(HeuristicPolicy),
+fn create_policy(model_path: Option<&str>) -> Arc<dyn Policy> {
+    #[cfg(feature = "neural")]
+    if let Some(path) = model_path {
+        return Arc::new(NeuralPolicy::from_file(path).expect("failed to load model"));
     }
-}
-
-#[cfg(not(feature = "neural"))]
-fn load_policy(_model_path: Option<&str>) -> Arc<dyn Policy> {
+    let _ = model_path;
     Arc::new(HeuristicPolicy)
 }
 
@@ -73,7 +69,7 @@ fn main() {
         .map(String::as_str)
         .unwrap_or("selfplay_data.jsonl");
     let simulations: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(800);
-    let model_path = args.get(4).map(String::as_str);
+    let model_path = args.get(4).map(String::as_str).filter(|s| *s != "-");
     let mode = args
         .get(5)
         .map(|s| parse_mode(s))
@@ -84,12 +80,12 @@ fn main() {
             .unwrap_or(4)
     });
 
-    let policy = load_policy(model_path);
     let mcts_config = MctsConfig {
         max_simulations: simulations,
         ..Default::default()
     };
 
+    let model_path_owned = model_path.map(String::from);
     let completed = Arc::new(Mutex::new(0u32));
     let results: Arc<Mutex<Vec<(u32, GameRecord)>>> =
         Arc::new(Mutex::new(Vec::with_capacity(num_games as usize)));
@@ -100,34 +96,38 @@ fn main() {
 
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
-            let policy = Arc::clone(&policy);
+            let model_path = model_path_owned.clone();
             let completed = Arc::clone(&completed);
             let results = Arc::clone(&results);
 
-            thread::spawn(move || loop {
-                let game_num = {
-                    let mut c = completed.lock().unwrap();
-                    if *c >= num_games {
-                        break;
-                    }
-                    *c += 1;
-                    *c
-                };
+            thread::spawn(move || {
+                let policy = create_policy(model_path.as_deref());
 
-                let config = SelfPlayConfig {
-                    mcts_config,
-                    setup_mode: mode,
-                    max_moves: 300,
-                    policy: Arc::clone(&policy),
-                };
+                loop {
+                    let game_num = {
+                        let mut c = completed.lock().unwrap();
+                        if *c >= num_games {
+                            break;
+                        }
+                        *c += 1;
+                        *c
+                    };
 
-                let record = play_game(&config);
-                eprintln!(
-                    "[t{thread_id}] Game {game_num}/{num_games}: {} moves, {:?}",
-                    record.total_moves, record.result
-                );
+                    let config = SelfPlayConfig {
+                        mcts_config,
+                        setup_mode: mode,
+                        max_moves: 300,
+                        policy: Arc::clone(&policy),
+                    };
 
-                results.lock().unwrap().push((game_num, record));
+                    let record = play_game(&config);
+                    eprintln!(
+                        "[t{thread_id}] Game {game_num}/{num_games}: {} moves, {:?}",
+                        record.total_moves, record.result
+                    );
+
+                    results.lock().unwrap().push((game_num, record));
+                }
             })
         })
         .collect();

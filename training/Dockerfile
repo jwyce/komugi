@@ -56,6 +56,7 @@ ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
 COPY training/model.py .
 COPY training/train.py .
 COPY training/export_onnx.py .
+COPY training/preprocess.py .
 COPY training/full_loop.sh .
 RUN chmod +x full_loop.sh
 
