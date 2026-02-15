@@ -4,6 +4,9 @@ A Rust engine for gungi, the fictional board game from Hunter x Hunter.
 
 Generates and validates legal moves, evaluates positions, and trains via self-play using an AlphaZero-style pipeline. The branching factor ranges from 200 to 700+ legal moves per position, far exceeding chess (~35).
 
+- [Gungi Rulebook](https://planetbanatt.net/docs/gungi_rulebook_en.pdf)
+- [gungi.js](https://github.com/jwyce/gungi.js) — TypeScript reference implementation
+
 ## Project Structure
 
 ```
