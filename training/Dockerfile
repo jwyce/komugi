@@ -44,6 +44,7 @@ print(pathlib.Path(onnxruntime.__file__).resolve().parent/'capi')")" && \
     NVIDIA_DIR="$(python -c "import nvidia; print(nvidia.__path__[0])")" && \
     mkdir -p /usr/local/lib && \
     ln -sf "$ORT_DIR"/libonnxruntime*.so* /usr/local/lib/ && \
+    ln -sf libonnxruntime.so.1 /usr/local/lib/libonnxruntime.so && \
     find "$NVIDIA_DIR" -name 'lib' -type d | tee /etc/ld.so.conf.d/nvidia-pip.conf && \
     echo /usr/local/lib >> /etc/ld.so.conf.d/nvidia-pip.conf && \
     echo /opt/conda/lib >> /etc/ld.so.conf.d/nvidia-pip.conf && \
