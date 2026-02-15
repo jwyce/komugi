@@ -2,4 +2,9 @@ torch>=2.0
 numpy
 onnx
 onnxruntime-gpu
+nvidia-cudnn-cu12
+nvidia-cublas-cu12
+nvidia-cuda-runtime-cu12
+nvidia-cufft-cu12
+nvidia-curand-cu12
 orjson

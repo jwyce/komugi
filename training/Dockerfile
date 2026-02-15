@@ -38,19 +38,19 @@ WORKDIR /workspace
 COPY training/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Symlink libonnxruntime.so from pip's onnxruntime package
-RUN ORT_SO="$(python -c "\
+RUN ORT_DIR="$(python -c "\
 import onnxruntime, pathlib; \
-p=pathlib.Path(onnxruntime.__file__).resolve().parent/'capi'; \
-c=sorted(p.glob('libonnxruntime.so*')); \
-assert c, f'No libonnxruntime.so found in {p}'; \
-print(c[0])")" && \
+print(pathlib.Path(onnxruntime.__file__).resolve().parent/'capi')")" && \
+    NVIDIA_DIR="$(python -c "import nvidia; print(nvidia.__path__[0])")" && \
     mkdir -p /usr/local/lib && \
-    ln -sf "$ORT_SO" /usr/local/lib/libonnxruntime.so && \
-    ldconfig
+    ln -sf "$ORT_DIR"/libonnxruntime*.so* /usr/local/lib/ && \
+    find "$NVIDIA_DIR" -name 'lib' -type d | tee /etc/ld.so.conf.d/nvidia-pip.conf && \
+    echo /usr/local/lib >> /etc/ld.so.conf.d/nvidia-pip.conf && \
+    echo /opt/conda/lib >> /etc/ld.so.conf.d/nvidia-pip.conf && \
+    ldconfig && \
+    ldd /usr/local/lib/libonnxruntime_providers_cuda.so | grep -c "not found" | grep -q "^0$"
 
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
-    LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
     PYTHONUNBUFFERED=1
 
 COPY training/model.py .
