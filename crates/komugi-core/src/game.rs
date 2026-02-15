@@ -1,5 +1,5 @@
 use crate::constants::SQUARES;
-use crate::movegen::in_check_with_marshal;
+use crate::movegen::{generate_all_pseudo_legal_moves_from_position, in_check_with_marshal};
 use crate::position::{HistoryEntry, Position, PositionError};
 use crate::types::{Color, HandPiece, Move, MoveList, MoveType, PieceType, SetupMode};
 
@@ -129,7 +129,7 @@ impl Gungi {
         if self.position.is_game_over() {
             MoveList::new()
         } else {
-            let mut moves = self.position.moves();
+            let mut moves = generate_all_pseudo_legal_moves_from_position(&self.position);
             if self.position.in_draft() {
                 moves.retain(|mv| mv.move_type == MoveType::Arata);
             }

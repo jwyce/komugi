@@ -321,6 +321,15 @@ pub fn apply_move_to_fen(fen: &str, mv: &Move) -> Result<String, FenError> {
                 .remove_top(from.square)?
                 .ok_or(BoardError::OutOfBounds)?;
             let _ = parsed.board.convert(mv.to.square, &mv.captured);
+            for captured in &mv.captured {
+                decrement_hand(
+                    &mut parsed.hand,
+                    Piece {
+                        piece_type: captured.piece_type,
+                        color: mv.color,
+                    },
+                )?;
+            }
         }
         MoveType::Arata => {
             decrement_hand(

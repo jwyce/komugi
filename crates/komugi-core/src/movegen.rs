@@ -175,14 +175,14 @@ pub trait MoveGenerator {
 
 pub fn generate_all_legal_moves(board: &Board, turn: Color) -> MoveList {
     let mut cloned = board.clone();
-    generate_all_legal_moves_with_mode(&mut cloned, turn, board.mode(), None)
+    generate_all_moves_with_mode(&mut cloned, turn, board.mode(), None, true)
 }
 
 pub fn generate_all_legal_moves_in_state(state: &ParsedFen) -> MoveList {
     let mut board = state.board.clone();
     let marshal_square = find_marshal_square(&board, state.turn);
     let mut moves =
-        generate_all_legal_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand));
+        generate_all_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand), true);
     for hand_piece in state
         .hand
         .iter()
@@ -195,6 +195,31 @@ pub fn generate_all_legal_moves_in_state(state: &ParsedFen) -> MoveList {
             mode: state.mode,
             drafting_rights: state.drafting,
             marshal_square,
+            enforce_legality: true,
+        };
+        append_arata_moves(&mut moves, &mut board, &ctx, hand_piece);
+    }
+    moves
+}
+
+pub fn generate_all_pseudo_legal_moves_in_state(state: &ParsedFen) -> MoveList {
+    let mut board = state.board.clone();
+    let marshal_square = find_marshal_square(&board, state.turn);
+    let mut moves =
+        generate_all_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand), false);
+    for hand_piece in state
+        .hand
+        .iter()
+        .copied()
+        .filter(|hp| hp.color == state.turn && hp.count > 0)
+    {
+        let ctx = ArataContext {
+            hand: &state.hand,
+            turn: state.turn,
+            mode: state.mode,
+            drafting_rights: state.drafting,
+            marshal_square,
+            enforce_legality: false,
         };
         append_arata_moves(&mut moves, &mut board, &ctx, hand_piece);
     }
@@ -204,11 +229,12 @@ pub fn generate_all_legal_moves_in_state(state: &ParsedFen) -> MoveList {
 pub fn generate_all_legal_moves_from_position(position: &Position) -> MoveList {
     let mut board = position.board.clone();
     let marshal_square = position.marshal_squares[position.turn as usize];
-    let mut moves = generate_all_legal_moves_with_mode(
+    let mut moves = generate_all_moves_with_mode(
         &mut board,
         position.turn,
         position.mode,
         Some(&position.hand),
+        true,
     );
     for hand_piece in position
         .hand
@@ -222,6 +248,36 @@ pub fn generate_all_legal_moves_from_position(position: &Position) -> MoveList {
             mode: position.mode,
             drafting_rights: position.drafting_rights,
             marshal_square,
+            enforce_legality: true,
+        };
+        append_arata_moves(&mut moves, &mut board, &ctx, hand_piece);
+    }
+    moves
+}
+
+pub fn generate_all_pseudo_legal_moves_from_position(position: &Position) -> MoveList {
+    let mut board = position.board.clone();
+    let marshal_square = position.marshal_squares[position.turn as usize];
+    let mut moves = generate_all_moves_with_mode(
+        &mut board,
+        position.turn,
+        position.mode,
+        Some(&position.hand),
+        false,
+    );
+    for hand_piece in position
+        .hand
+        .iter()
+        .copied()
+        .filter(|hp| hp.color == position.turn && hp.count > 0)
+    {
+        let ctx = ArataContext {
+            hand: &position.hand,
+            turn: position.turn,
+            mode: position.mode,
+            drafting_rights: position.drafting_rights,
+            marshal_square,
+            enforce_legality: false,
         };
         append_arata_moves(&mut moves, &mut board, &ctx, hand_piece);
     }
@@ -229,195 +285,19 @@ pub fn generate_all_legal_moves_from_position(position: &Position) -> MoveList {
 }
 
 pub fn is_square_attacked(board: &Board, square: Square, by_color: Color) -> bool {
-    for (dy, dx) in DIRS {
-        let mut rank = square.rank as i8 + dy;
-        let mut file = square.file as i8 + dx;
-
-        while (1..=9).contains(&rank) && (1..=9).contains(&file) {
-            let src = Square::new_unchecked(rank as u8, file as u8);
-            if let Some((piece, _)) = board.get_top(src) {
-                if piece.color == by_color && can_piece_attack_square(board, src, piece, square) {
-                    return true;
-                }
-            }
-
-            rank += dy;
-            file += dx;
-        }
-    }
-    false
-}
-
-fn can_piece_attack_square(board: &Board, origin: Square, piece: Piece, target: Square) -> bool {
-    if origin == target {
-        return false;
-    }
-
-    let Some((_, origin_tier)) = board.get_top(origin) else {
-        return false;
-    };
-
-    let dr = target.rank as i8 - origin.rank as i8;
-    let df = target.file as i8 - origin.file as i8;
-
-    let probes = PIECE_PROBES[piece.piece_type as usize];
-    for (idx, probe) in probes.iter().copied().enumerate() {
-        let dir = adjusted_dir(piece.color, DIRS[idx]);
-        let Some(distance) = distance_along_dir(dr, df, dir) else {
+    for src in SQUARES {
+        let Some((piece, _)) = board.get_top(src) else {
             continue;
         };
-
-        match probe {
-            Probe::None => continue,
-            Probe::Infinite => {
-                if path_allows_attack(
-                    board,
-                    origin,
-                    piece,
-                    origin_tier,
-                    AttackPathSpec {
-                        dir,
-                        start: 1,
-                        target_distance: distance,
-                        max_steps: None,
-                    },
-                ) {
-                    return true;
-                }
-            }
-            Probe::Finite { start, carry } => {
-                let max_steps = origin_tier + carry - 1;
-                if distance < start {
-                    continue;
-                }
-                let end_distance = start + max_steps - 1;
-                if distance > end_distance {
-                    continue;
-                }
-                if path_allows_attack(
-                    board,
-                    origin,
-                    piece,
-                    origin_tier,
-                    AttackPathSpec {
-                        dir,
-                        start,
-                        target_distance: distance,
-                        max_steps: Some(max_steps),
-                    },
-                ) {
-                    return true;
-                }
-            }
+        if piece.color != by_color {
+            continue;
         }
-    }
-
-    false
-}
-
-fn path_allows_attack(
-    board: &Board,
-    origin: Square,
-    origin_piece: Piece,
-    origin_tier: u8,
-    spec: AttackPathSpec,
-) -> bool {
-    let AttackPathSpec {
-        dir,
-        start,
-        target_distance,
-        max_steps,
-    } = spec;
-    let (dy, dx) = dir;
-
-    if start > 1 {
-        for offset in 1..start {
-            let rank = origin.rank as i8 + dy * offset as i8;
-            let file = origin.file as i8 + dx * offset as i8;
-            let Some((_, tier)) = get_top_coords(board, rank, file) else {
-                continue;
-            };
-            if tier > origin_tier {
-                return false;
-            }
-        }
-    }
-
-    let mut rank = origin.rank as i8 + dy * start as i8;
-    let mut file = origin.file as i8 + dx * start as i8;
-    let mut distance = start;
-    let mut step = 0u8;
-
-    while (1..=9).contains(&rank) && (1..=9).contains(&file) {
-        let has_piece = if let Some((_, tier)) = get_top_coords(board, rank, file) {
-            if tier > origin_tier {
-                return false;
-            }
-            true
-        } else {
-            false
-        };
-
-        if distance == target_distance {
+        let attacks = attacked_squares_for_piece(board, src, piece);
+        if attacks.iter().any(|&sq| sq == square) {
             return true;
         }
-
-        if has_piece && !is_leap_piece(origin_piece.piece_type) {
-            return false;
-        }
-
-        rank += dy;
-        file += dx;
-        distance = distance.saturating_add(1);
-        step = step.saturating_add(1);
-
-        if matches!(max_steps, Some(max) if step >= max) {
-            return false;
-        }
     }
-
     false
-}
-
-#[derive(Debug, Clone, Copy)]
-struct AttackPathSpec {
-    dir: (i8, i8),
-    start: u8,
-    target_distance: u8,
-    max_steps: Option<u8>,
-}
-
-fn distance_along_dir(dr: i8, df: i8, dir: (i8, i8)) -> Option<u8> {
-    let (dy, dx) = dir;
-
-    if dy == 0 {
-        if dr != 0 || dx == 0 || df == 0 || df.signum() != dx.signum() {
-            return None;
-        }
-        return Some(df.unsigned_abs());
-    }
-
-    if dx == 0 {
-        if df != 0 || dr == 0 || dr.signum() != dy.signum() {
-            return None;
-        }
-        return Some(dr.unsigned_abs());
-    }
-
-    if dr == 0 || df == 0 {
-        return None;
-    }
-    if dr.signum() != dy.signum() || df.signum() != dx.signum() {
-        return None;
-    }
-
-    let dist_rank = dr.unsigned_abs();
-    let dist_file = df.unsigned_abs();
-    if dist_rank == dist_file {
-        Some(dist_rank)
-    } else {
-        None
-    }
 }
 
 pub fn in_check(board: &Board, turn: Color) -> bool {
@@ -455,17 +335,19 @@ pub fn generate_arata(state: &ParsedFen, hand_piece: HandPiece) -> MoveList {
             mode: state.mode,
             drafting_rights: state.drafting,
             marshal_square,
+            enforce_legality: true,
         },
         hand_piece,
     );
     out
 }
 
-fn generate_all_legal_moves_with_mode(
+fn generate_all_moves_with_mode(
     board: &mut Board,
     turn: Color,
     mode: SetupMode,
     hand: Option<&[HandPiece]>,
+    enforce_legality: bool,
 ) -> MoveList {
     let max_tier = max_tier_for_mode(mode);
     let marshal_can_stack = matches!(mode, SetupMode::Advanced | SetupMode::Intermediate);
@@ -483,8 +365,7 @@ fn generate_all_legal_moves_with_mode(
         let from = TieredSquare::new_unchecked(from_square, tier);
         let targets = attacked_squares_for_piece(board, from_square, piece);
         for target_square in targets {
-            let maybe_tower = board.get(target_square);
-            let maybe_top = maybe_tower.and_then(|tower| tower.get_top());
+            let maybe_top = board.get(target_square).and_then(|tower| tower.get_top());
 
             if maybe_top.is_none() {
                 let mv = Move::new(
@@ -494,97 +375,106 @@ fn generate_all_legal_moves_with_mode(
                     TieredSquare::new_unchecked(target_square, 1),
                     MoveType::Route,
                 );
-                if is_legal_after_move(board, turn, &mv, marshal_square) {
+                if !enforce_legality || is_legal_after_move(board, turn, &mv, marshal_square) {
                     let _ = legal.try_push(mv);
                 }
                 continue;
             }
 
             let (top_piece, top_tier) = maybe_top.expect("checked is_some");
-            if top_piece.color == turn {
-                if top_tier < max_tier
-                    && top_piece.piece_type != PieceType::Marshal
-                    && (piece.piece_type != PieceType::Marshal || marshal_can_stack)
-                {
-                    let mv = Move::new(
-                        turn,
-                        piece.piece_type,
-                        Some(from),
-                        TieredSquare::new_unchecked(target_square, top_tier + 1),
-                        MoveType::Tsuke,
-                    );
-                    if is_legal_after_move(board, turn, &mv, marshal_square) {
-                        let _ = legal.try_push(mv);
+
+            // Tsuke — generated for ANY top piece (friendly or enemy),
+            // as long as tier < maxTier and top is not Marshal.
+            // Matches gungi.js move_gen.ts line 141.
+            if top_tier < max_tier
+                && top_piece.piece_type != PieceType::Marshal
+                && (piece.piece_type != PieceType::Marshal || marshal_can_stack)
+            {
+                let mv = Move::new(
+                    turn,
+                    piece.piece_type,
+                    Some(from),
+                    TieredSquare::new_unchecked(target_square, top_tier + 1),
+                    MoveType::Tsuke,
+                );
+                if !enforce_legality || is_legal_after_move(board, turn, &mv, marshal_square) {
+                    let _ = legal.try_push(mv);
+                }
+
+                // Betrayal — only for enemy tops, inside tsuke block so it
+                // inherits the "not Marshal" check (BUG #3 fix).
+                // Matches gungi.js move_gen.ts line 147.
+                if piece.piece_type == PieceType::Tactician && top_piece.color != turn {
+                    if let Some(tower) = board.get(target_square) {
+                        let mut enemies = arrayvec::ArrayVec::<Piece, 3>::new();
+                        for p in tower.iter().filter(|p| p.color != turn) {
+                            let _ = enemies.try_push(p);
+                        }
+
+                        if !enemies.is_empty() {
+                            let mut enemy_count = [0u8; 14];
+                            for e in &enemies {
+                                enemy_count[e.piece_type as usize] += 1;
+                            }
+
+                            let mut hand_count = [0u8; 14];
+                            if let Some(hand) = hand {
+                                for hp in hand.iter().filter(|h| h.color == turn) {
+                                    hand_count[hp.piece_type as usize] = hp.count;
+                                }
+                            }
+
+                            let mut betrayal_options = arrayvec::ArrayVec::<Piece, 3>::new();
+                            for e in &enemies {
+                                let needed = enemy_count[e.piece_type as usize];
+                                let have = hand_count[e.piece_type as usize];
+                                if have >= needed {
+                                    let _ = betrayal_options.try_push(*e);
+                                }
+                            }
+
+                            for combo in combinations(&betrayal_options) {
+                                let mut mv = Move::new(
+                                    turn,
+                                    piece.piece_type,
+                                    Some(from),
+                                    TieredSquare::new_unchecked(target_square, top_tier + 1),
+                                    MoveType::Betray,
+                                );
+                                for p in combo {
+                                    let _ = mv.captured.try_push(p);
+                                }
+                                if !enforce_legality
+                                    || is_legal_after_move(board, turn, &mv, marshal_square)
+                                {
+                                    let _ = legal.try_push(mv);
+                                }
+                            }
+                        }
                     }
                 }
-                continue;
             }
 
-            if piece.piece_type == PieceType::Tactician && top_tier < max_tier {
-                if let Some(tower) = maybe_tower {
-                    let mut enemies = arrayvec::ArrayVec::<Piece, 3>::new();
-                    for p in tower.iter().filter(|p| p.color != turn) {
-                        let _ = enemies.try_push(p);
-                    }
-
-                    if !enemies.is_empty() {
-                        let mut enemy_count = [0u8; 14];
-                        for e in &enemies {
-                            enemy_count[e.piece_type as usize] += 1;
-                        }
-
-                        let mut hand_count = [0u8; 14];
-                        if let Some(hand) = hand {
-                            for hp in hand.iter().filter(|h| h.color == turn) {
-                                hand_count[hp.piece_type as usize] = hp.count;
-                            }
-                        }
-
-                        let mut betrayal_options = arrayvec::ArrayVec::<Piece, 3>::new();
-                        for e in &enemies {
-                            let needed = enemy_count[e.piece_type as usize];
-                            let have = hand_count[e.piece_type as usize];
-                            if have >= needed {
-                                let _ = betrayal_options.try_push(*e);
-                            }
-                        }
-
-                        for combo in combinations(&betrayal_options) {
-                            let mut mv = Move::new(
-                                turn,
-                                piece.piece_type,
-                                Some(from),
-                                TieredSquare::new_unchecked(target_square, top_tier + 1),
-                                MoveType::Betray,
-                            );
-                            for p in combo {
-                                let _ = mv.captured.try_push(p);
-                            }
-                            if is_legal_after_move(board, turn, &mv, marshal_square) {
-                                let _ = legal.try_push(mv);
-                            }
-                        }
+            // Capture — only for enemy tops.
+            if top_piece.color != turn {
+                let mut mv = Move::new(
+                    turn,
+                    piece.piece_type,
+                    Some(from),
+                    TieredSquare::new_unchecked(
+                        target_square,
+                        capture_tier(board, target_square, turn),
+                    ),
+                    MoveType::Capture,
+                );
+                if let Some(tower) = board.get(target_square) {
+                    for captured in tower.iter().filter(|p| p.color != turn) {
+                        let _ = mv.captured.try_push(captured);
                     }
                 }
-            }
-
-            let mut mv = Move::new(
-                turn,
-                piece.piece_type,
-                Some(from),
-                TieredSquare::new_unchecked(
-                    target_square,
-                    capture_tier(board, target_square, turn),
-                ),
-                MoveType::Capture,
-            );
-            if let Some(tower) = board.get(target_square) {
-                for captured in tower.iter().filter(|p| p.color != turn) {
-                    let _ = mv.captured.try_push(captured);
+                if !enforce_legality || is_legal_after_move(board, turn, &mv, marshal_square) {
+                    let _ = legal.try_push(mv);
                 }
-            }
-            if is_legal_after_move(board, turn, &mv, marshal_square) {
-                let _ = legal.try_push(mv);
             }
         }
     }
@@ -658,7 +548,9 @@ fn append_arata_moves(
                         TieredSquare::new_unchecked(target, next_tier),
                         MoveType::Arata,
                     );
-                    if is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square) {
+                    if !ctx.enforce_legality
+                        || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
+                    {
                         let _ = all.try_push(mv);
                     }
                 }
@@ -671,7 +563,9 @@ fn append_arata_moves(
                     MoveType::Arata,
                 );
                 mv.draft_finished = true;
-                if is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square) {
+                if !ctx.enforce_legality
+                    || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
+                {
                     let _ = all.try_push(mv);
                 }
             } else {
@@ -682,7 +576,9 @@ fn append_arata_moves(
                     TieredSquare::new_unchecked(target, next_tier),
                     MoveType::Arata,
                 );
-                if is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square) {
+                if !ctx.enforce_legality
+                    || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
+                {
                     let _ = all.try_push(mv);
                 }
             }
@@ -1013,4 +909,5 @@ struct ArataContext<'a> {
     mode: SetupMode,
     drafting_rights: [bool; 2],
     marshal_square: Option<Square>,
+    enforce_legality: bool,
 }

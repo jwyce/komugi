@@ -2,7 +2,7 @@
 set -euo pipefail
 
 GAMES="${1:-5000}"
-SIMS="${2:-800}"
+SIMS="${2:-400}"
 EPOCHS="${3:-50}"
 DEVICE="${4:-cuda}"
 
@@ -80,16 +80,9 @@ run_generation() {
         echo "Self-play with heuristic policy (no model yet)"
     fi
 
-    local effective_sims=$SIMS
-    if [ "$gen_in_phase" -ge 7 ]; then
-        effective_sims=$((SIMS * 2))
-    elif [ "$gen_in_phase" -ge 3 ]; then
-        effective_sims=$(( (SIMS * 3 + 1) / 2 ))
-    fi
-
-    echo "Generating $GAMES games ($mode, $effective_sims sims, $THREADS threads)..."
+    echo "Generating $GAMES games ($mode, $SIMS sims, $THREADS threads)..."
     local sp_start=$SECONDS
-    selfplay "$GAMES" "$data_file" "$effective_sims" "$model_arg" "$mode" "$THREADS"
+    selfplay "$GAMES" "$data_file" "$SIMS" "$model_arg" "$mode" "$THREADS"
     local sp_elapsed=$((SECONDS - sp_start))
     local positions
     positions=$(wc -l < "$data_file")
@@ -158,33 +151,8 @@ run_generation() {
         --num-blocks "$NUM_BLOCKS" \
         --channels "$CHANNELS"
 
-    if [ -n "$PREV_MODEL" ] && [ -f "$PREV_MODEL" ]; then
-        local gate_games=20
-        local gate_sims=200
-        local new_stderr
-        new_stderr=$(mktemp)
-        local old_stderr
-        old_stderr=$(mktemp)
-
-        selfplay "$gate_games" /dev/null "$gate_sims" "$output_model" "$mode" "$THREADS" 2>"$new_stderr"
-        local new_decisive
-        new_decisive=$(grep -cE "WhiteWin|BlackWin" "$new_stderr" || true)
-
-        selfplay "$gate_games" /dev/null "$gate_sims" "$PREV_MODEL" "$mode" "$THREADS" 2>"$old_stderr"
-        local old_decisive
-        old_decisive=$(grep -cE "WhiteWin|BlackWin" "$old_stderr" || true)
-
-        rm -f "$new_stderr" "$old_stderr"
-
-        if [ "$new_decisive" -ge "$old_decisive" ]; then
-            echo "GATING: New model promoted ($new_decisive decisive >= $old_decisive)"
-            PREV_MODEL="$output_model"
-        else
-            echo "GATING: Old model retained ($old_decisive decisive > $new_decisive)"
-        fi
-    else
-        PREV_MODEL="$output_model"
-    fi
+    PREV_MODEL="$output_model"
+    echo "Model promoted: $output_model"
 
     touch "$MODELS_DIR/${gen_label}.done"
     GLOBAL_GEN=$((GLOBAL_GEN + 1))

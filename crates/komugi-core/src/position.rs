@@ -40,6 +40,7 @@ pub struct HistoryEntry {
     pub move_number: u32,
     pub zobrist_hash: u64,
     pub hand_piece_idx: Option<usize>,
+    pub betrayal_hand_indices: ArrayVec<usize, 3>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,7 @@ impl Position {
             move_number: self.move_number,
             zobrist_hash: self.zobrist_hash,
             hand_piece_idx: None,
+            betrayal_hand_indices: ArrayVec::new(),
         };
 
         self.apply_move(mv, &mut entry)?;
@@ -123,6 +125,9 @@ impl Position {
         }
         restore_tower(&mut self.board, entry.mv.to.square, entry.to_tower)?;
         if let Some(idx) = entry.hand_piece_idx {
+            self.hand[idx].count = self.hand[idx].count.saturating_add(1);
+        }
+        for &idx in &entry.betrayal_hand_indices {
             self.hand[idx].count = self.hand[idx].count.saturating_add(1);
         }
 
@@ -197,6 +202,18 @@ impl Position {
                 let from = mv.from.ok_or(PositionError::MissingSource)?;
                 let _ = self.board.remove_top(from.square)?;
                 let _ = self.board.convert(mv.to.square, &mv.captured)?;
+                for captured in &mv.captured {
+                    let (idx, old_count, new_count) =
+                        self.decrement_hand_piece(mv.color, captured.piece_type)?;
+                    let _ = entry.betrayal_hand_indices.try_push(idx);
+                    zobrist_keys().update_hand_count(
+                        &mut self.zobrist_hash,
+                        captured.piece_type,
+                        mv.color,
+                        old_count,
+                        new_count,
+                    );
+                }
             }
             MoveType::Arata => {
                 let (idx, old_count, new_count) = self.decrement_hand_piece(mv.color, mv.piece)?;

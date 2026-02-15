@@ -280,7 +280,7 @@ pub struct HandPiece {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Score(pub i32);
 
-pub type MoveList = ArrayVec<Move, 256>;
+pub type MoveList = ArrayVec<Move, 1024>;
 
 #[cfg(test)]
 mod tests {
