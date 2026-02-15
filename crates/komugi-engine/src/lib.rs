@@ -19,6 +19,6 @@ pub use encoding::{
 };
 pub use mcts::{MctsConfig, MctsSearcher};
 #[cfg(feature = "neural")]
-pub use neural::NeuralPolicy;
+pub use neural::{GpuBatchPolicy, GpuInferencePool, NeuralPolicy};
 pub use selfplay::{play_game, GameRecord, GameResult, SelfPlayConfig, TrainingRecord};
 pub use tt::{Bound, Entry as TTEntry, TranspositionTable};

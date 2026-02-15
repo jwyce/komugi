@@ -1,5 +1,5 @@
 torch>=2.0
 numpy
 onnx
-onnxruntime
+onnxruntime-gpu
 orjson

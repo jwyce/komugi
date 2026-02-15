@@ -5,16 +5,20 @@ use std::thread;
 use komugi_core::{Policy, SetupMode};
 use komugi_engine::mcts::{HeuristicPolicy, MctsConfig};
 #[cfg(feature = "neural")]
+use komugi_engine::neural::GpuInferencePool;
+#[cfg(feature = "neural")]
 use komugi_engine::NeuralPolicy;
 use komugi_engine::{play_game, GameRecord, SelfPlayConfig};
 
-fn create_policy(model_path: Option<&str>) -> Arc<dyn Policy> {
-    #[cfg(feature = "neural")]
-    if let Some(path) = model_path {
-        return Arc::new(NeuralPolicy::from_file(path).expect("failed to load model"));
+fn detect_gpu_count() -> usize {
+    let output = std::process::Command::new("nvidia-smi").arg("-L").output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.starts_with("GPU "))
+            .count(),
+        _ => 0,
     }
-    let _ = model_path;
-    Arc::new(HeuristicPolicy)
 }
 
 fn parse_mode(s: &str) -> SetupMode {
@@ -85,6 +89,28 @@ fn main() {
         ..Default::default()
     };
 
+    #[cfg(feature = "neural")]
+    let gpu_pool: Option<Arc<GpuInferencePool>> = model_path.and_then(|path| {
+        let num_gpus = detect_gpu_count();
+        if num_gpus == 0 {
+            eprintln!("No GPUs detected, falling back to CPU inference");
+            return None;
+        }
+        match GpuInferencePool::new(path, num_gpus) {
+            Ok(pool) => {
+                eprintln!("Using GPU batch inference on {num_gpus} GPUs");
+                Some(Arc::new(pool))
+            }
+            Err(e) => {
+                eprintln!("GPU pool init failed ({e}), falling back to CPU inference");
+                None
+            }
+        }
+    });
+
+    #[cfg(not(feature = "neural"))]
+    let gpu_pool: Option<Arc<()>> = None;
+
     let model_path_owned = model_path.map(String::from);
     let completed = Arc::new(Mutex::new(0u32));
     let results: Arc<Mutex<Vec<(u32, GameRecord)>>> =
@@ -99,9 +125,27 @@ fn main() {
             let model_path = model_path_owned.clone();
             let completed = Arc::clone(&completed);
             let results = Arc::clone(&results);
+            #[cfg(feature = "neural")]
+            let gpu_pool = gpu_pool.clone();
 
             thread::spawn(move || {
-                let policy = create_policy(model_path.as_deref());
+                let policy: Arc<dyn Policy> = {
+                    #[cfg(feature = "neural")]
+                    {
+                        if let Some(ref pool) = gpu_pool {
+                            Arc::new(pool.policy(thread_id))
+                        } else if let Some(ref path) = model_path {
+                            Arc::new(NeuralPolicy::from_file(path).expect("failed to load model"))
+                        } else {
+                            Arc::new(HeuristicPolicy)
+                        }
+                    }
+                    #[cfg(not(feature = "neural"))]
+                    {
+                        let _ = &model_path;
+                        Arc::new(HeuristicPolicy)
+                    }
+                };
 
                 loop {
                     let game_num = {
