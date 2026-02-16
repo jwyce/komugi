@@ -80,13 +80,20 @@ run_generation() {
         echo "Self-play with heuristic policy (no model yet)"
     fi
 
-    echo "Generating $GAMES games ($mode, $SIMS sims, $THREADS threads)..."
-    local sp_start=$SECONDS
-    selfplay "$GAMES" "$data_file" "$SIMS" "$model_arg" "$mode" "$THREADS"
-    local sp_elapsed=$((SECONDS - sp_start))
-    local positions
-    positions=$(wc -l < "$data_file")
-    echo "Self-play done: $positions positions in ${sp_elapsed}s"
+    local sp_elapsed=0
+    if [ -f "$data_file" ] && [ -s "$data_file" ]; then
+        local positions
+        positions=$(wc -l < "$data_file")
+        echo "Self-play data already exists: $data_file ($positions positions), skipping..."
+    else
+        echo "Generating $GAMES games ($mode, $SIMS sims, $THREADS threads)..."
+        local sp_start=$SECONDS
+        selfplay "$GAMES" "$data_file" "$SIMS" "$model_arg" "$mode" "$THREADS"
+        sp_elapsed=$((SECONDS - sp_start))
+        local positions
+        positions=$(wc -l < "$data_file")
+        echo "Self-play done: $positions positions in ${sp_elapsed}s"
+    fi
 
     local resume_flag=""
     if [ -n "$PREV_MODEL" ] && [ "$gen_in_phase" -gt 0 ]; then

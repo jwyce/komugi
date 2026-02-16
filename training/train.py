@@ -421,9 +421,12 @@ def main() -> None:
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         resumed_epoch = checkpoint.get("epoch", 0)
-        start_epoch = resumed_epoch + 1
+        # Warm-start: load weights but reset epoch counter (training on new data)
+        start_epoch = 1
         if is_main_process():
-            print(f"resumed from {args.resume} (epoch {resumed_epoch})")
+            print(
+                f"resumed from {args.resume} (epoch {resumed_epoch}), resetting to epoch 1"
+            )
 
     if is_main_process():
         csv_file = open(metrics_file, "a" if metrics_file_exists else "w", newline="")
