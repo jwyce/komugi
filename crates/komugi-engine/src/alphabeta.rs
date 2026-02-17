@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use komugi_core::{
@@ -34,6 +35,7 @@ pub struct AlphaBetaResult {
     pub score: Score,
     pub depth: u8,
     pub nodes: u64,
+    pub pv: Vec<Move>,
 }
 
 pub struct AlphaBetaSearcher {
@@ -94,6 +96,24 @@ impl AlphaBetaSearcher {
         position: &Position,
         limits: SearchLimits,
     ) -> AlphaBetaResult {
+        self.search_with_info_internal(position, limits, &[])
+    }
+
+    pub fn search_with_exclusions(
+        &mut self,
+        position: &Position,
+        limits: SearchLimits,
+        exclude_moves: &[Move],
+    ) -> AlphaBetaResult {
+        self.search_with_info_internal(position, limits, exclude_moves)
+    }
+
+    fn search_with_info_internal(
+        &mut self,
+        position: &Position,
+        limits: SearchLimits,
+        exclude_moves: &[Move],
+    ) -> AlphaBetaResult {
         self.nodes = 0;
         self.stop = false;
         self.last_completed_depth = 0;
@@ -106,6 +126,7 @@ impl AlphaBetaSearcher {
         let max_depth = limits.depth.unwrap_or(self.max_depth);
         let mut best_move = None;
         let mut best_score = self.terminal_score(position, 0);
+        let mut pv = Vec::new();
         let mut working = position.clone();
 
         for depth in 1..=max_depth {
@@ -127,7 +148,13 @@ impl AlphaBetaSearcher {
             let mut failures = 0;
 
             match loop {
-                match self.search_root(&mut working, depth, alpha_window, beta_window) {
+                match self.search_root(
+                    &mut working,
+                    depth,
+                    alpha_window,
+                    beta_window,
+                    exclude_moves,
+                ) {
                     Ok((candidate, score))
                         if depth == 1
                             || (score > alpha_window && score < beta_window)
@@ -153,6 +180,8 @@ impl AlphaBetaSearcher {
                     best_move = candidate;
                     best_score = score;
                     self.last_completed_depth = depth;
+                    let mut pv_position = position.clone();
+                    pv = self.extract_pv_line(&mut pv_position);
                 }
                 Err(AbortSearch) => break,
             }
@@ -163,6 +192,7 @@ impl AlphaBetaSearcher {
             score: Score(best_score),
             depth: self.last_completed_depth,
             nodes: self.nodes,
+            pv,
         }
     }
 
@@ -176,6 +206,7 @@ impl AlphaBetaSearcher {
         depth: u8,
         mut alpha: i32,
         beta: i32,
+        exclude_moves: &[Move],
     ) -> Result<(Option<Move>, i32), AbortSearch> {
         self.bump_nodes()?;
 
@@ -196,6 +227,7 @@ impl AlphaBetaSearcher {
         };
         let next_depth = depth.saturating_sub(1).saturating_add(extension);
         let mut moves = position.moves().into_iter().collect::<Vec<_>>();
+        moves.retain(|mv| !exclude_moves.contains(mv));
         self.order_moves(&mut moves, tt_move.as_ref(), 0);
 
         if moves.is_empty() {
@@ -557,6 +589,38 @@ impl AlphaBetaSearcher {
         }
     }
 
+    fn extract_pv_line(&self, position: &mut Position) -> Vec<Move> {
+        let mut pv = Vec::new();
+        let mut seen = HashSet::new();
+        let base_history_len = position.history.len();
+
+        loop {
+            let key = position.zobrist_hash;
+            if !seen.insert(key) {
+                break;
+            }
+
+            let Some(entry) = self.tt.probe(key) else {
+                break;
+            };
+            let Some(best_move) = entry.best_move.clone() else {
+                break;
+            };
+
+            if position.make_move(&best_move).is_err() {
+                break;
+            }
+
+            pv.push(best_move);
+        }
+
+        while position.history.len() > base_history_len {
+            let _ = position.unmake_move();
+        }
+
+        pv
+    }
+
     fn order_moves(&self, moves: &mut [Move], tt_move: Option<&Move>, ply: u8) {
         moves.sort_by_key(|mv| -self.move_order_key(mv, tt_move, ply));
     }
@@ -745,5 +809,168 @@ fn opposite(color: Color) -> Color {
     match color {
         Color::White => Color::Black,
         Color::Black => Color::White,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use komugi_core::SetupMode;
+
+    use super::*;
+
+    #[test]
+    fn search_with_info_returns_pv_starting_with_best_move() {
+        let position = Position::new(SetupMode::Beginner);
+        let mut searcher = AlphaBetaSearcher::default();
+
+        let result = searcher.search_with_info(
+            &position,
+            SearchLimits {
+                depth: Some(2),
+                ..SearchLimits::default()
+            },
+        );
+
+        assert!(!result.pv.is_empty());
+        assert_eq!(result.pv.first(), result.best_move.as_ref());
+    }
+
+    #[test]
+    fn pv_extraction_stops_on_cycle_and_restores_position() {
+        let mut searcher = AlphaBetaSearcher::default();
+        let position = Position::new(SetupMode::Beginner);
+        let (sequence, keys) =
+            find_four_ply_cycle(&position).expect("expected a reversible sequence");
+
+        for idx in 0..sequence.len() {
+            searcher.tt.store(Entry {
+                key: keys[idx],
+                depth: 4,
+                score: 0,
+                bound: Bound::Exact,
+                best_move: Some(sequence[idx].clone()),
+            });
+        }
+
+        let mut walk_position = position.clone();
+        let start_hash = walk_position.zobrist_hash;
+        let start_history_len = walk_position.history.len();
+
+        let pv = searcher.extract_pv_line(&mut walk_position);
+
+        assert_eq!(pv, sequence);
+        assert_eq!(walk_position.zobrist_hash, start_hash);
+        assert_eq!(walk_position.history.len(), start_history_len);
+    }
+
+    fn find_four_ply_cycle(position: &Position) -> Option<(Vec<Move>, Vec<u64>)> {
+        let root_hash = position.zobrist_hash;
+        let mut current = position.clone();
+
+        for white_1 in current.moves().into_iter().take(64) {
+            current.make_move(&white_1).ok()?;
+            let hash_1 = current.zobrist_hash;
+
+            for black_1 in current.moves().into_iter().take(64) {
+                current.make_move(&black_1).ok()?;
+                let hash_2 = current.zobrist_hash;
+
+                for white_2 in current.moves().into_iter().take(64) {
+                    current.make_move(&white_2).ok()?;
+                    let hash_3 = current.zobrist_hash;
+
+                    for black_2 in current.moves().into_iter().take(64) {
+                        current.make_move(&black_2).ok()?;
+
+                        if current.zobrist_hash == root_hash {
+                            let sequence = vec![
+                                white_1.clone(),
+                                black_1.clone(),
+                                white_2.clone(),
+                                black_2.clone(),
+                            ];
+                            let keys = vec![root_hash, hash_1, hash_2, hash_3];
+                            let _ = current.unmake_move();
+                            let _ = current.unmake_move();
+                            let _ = current.unmake_move();
+                            let _ = current.unmake_move();
+                            return Some((sequence, keys));
+                        }
+
+                        let _ = current.unmake_move();
+                    }
+
+                    let _ = current.unmake_move();
+                }
+
+                let _ = current.unmake_move();
+            }
+
+            let _ = current.unmake_move();
+        }
+
+        None
+    }
+
+    #[test]
+    fn test_exclude_best_move_returns_second_best() {
+        let mut searcher = AlphaBetaSearcher::default();
+        let pos = Position::new(SetupMode::Beginner);
+
+        // Get the best move without exclusions
+        let result1 = searcher.search_with_info(
+            &pos,
+            SearchLimits {
+                depth: Some(2),
+                ..SearchLimits::default()
+            },
+        );
+        let best_move = result1.best_move.clone();
+
+        assert!(best_move.is_some(), "Should find a best move");
+
+        // Now exclude the best move and search again
+        let mut searcher2 = AlphaBetaSearcher::default();
+        let result2 = searcher2.search_with_exclusions(
+            &pos,
+            SearchLimits {
+                depth: Some(2),
+                ..SearchLimits::default()
+            },
+            &[best_move.clone().unwrap()],
+        );
+        let second_best = result2.best_move.clone();
+
+        // The second best should be different from the best
+        assert!(second_best.is_some(), "Should find a second-best move");
+        assert_ne!(
+            result1.best_move, result2.best_move,
+            "Excluding best move should return different move"
+        );
+    }
+
+    #[test]
+    fn test_exclude_all_moves_returns_none() {
+        let mut searcher = AlphaBetaSearcher::default();
+        let pos = Position::new(SetupMode::Beginner);
+
+        // Get all legal moves
+        let all_moves = pos.moves();
+
+        // Exclude all moves
+        let result = searcher.search_with_exclusions(
+            &pos,
+            SearchLimits {
+                depth: Some(1),
+                ..SearchLimits::default()
+            },
+            &all_moves,
+        );
+
+        // Should return None when all moves are excluded
+        assert!(
+            result.best_move.is_none(),
+            "Should return None when all moves are excluded"
+        );
     }
 }
