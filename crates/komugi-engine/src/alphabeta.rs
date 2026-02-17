@@ -13,6 +13,7 @@ const MATE_SCORE: i32 = 30_000;
 const DEFAULT_MAX_DEPTH: u8 = 4;
 const CHECK_INTERVAL_NODES: u64 = 2_048;
 const CHECK_EXTENSION_MAX_PLY: u8 = 32;
+const PV_WALK_MAX_DEPTH: usize = 14;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AlphaBetaConfig {
@@ -36,6 +37,20 @@ pub struct AlphaBetaResult {
     pub depth: u8,
     pub nodes: u64,
     pub pv: Vec<Move>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PvLine {
+    pub moves: Vec<Move>,
+    pub score: Score,
+    pub depth: u8,
+    pub nodes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiPvResult {
+    pub lines: Vec<PvLine>,
+    pub total_nodes: u64,
 }
 
 pub struct AlphaBetaSearcher {
@@ -106,6 +121,43 @@ impl AlphaBetaSearcher {
         exclude_moves: &[Move],
     ) -> AlphaBetaResult {
         self.search_with_info_internal(position, limits, exclude_moves)
+    }
+
+    pub fn search_multi_pv(
+        &mut self,
+        position: &Position,
+        limits: SearchLimits,
+        num_pv: usize,
+    ) -> MultiPvResult {
+        let mut exclude_moves = Vec::new();
+        let mut lines = Vec::with_capacity(num_pv);
+        let mut total_nodes = 0u64;
+
+        for _ in 0..num_pv {
+            let result = self.search_with_exclusions(position, limits, &exclude_moves);
+            total_nodes = total_nodes.saturating_add(result.nodes);
+
+            let Some(best_move) = result.best_move else {
+                break;
+            };
+
+            let mut line_moves = result.pv;
+            if line_moves.first() != Some(&best_move) {
+                line_moves.insert(0, best_move.clone());
+            }
+
+            lines.push(PvLine {
+                moves: line_moves,
+                score: result.score,
+                depth: result.depth,
+                nodes: result.nodes,
+            });
+            exclude_moves.push(best_move);
+        }
+
+        lines.sort_by(|a, b| b.score.cmp(&a.score));
+
+        MultiPvResult { lines, total_nodes }
     }
 
     fn search_with_info_internal(
@@ -595,6 +647,10 @@ impl AlphaBetaSearcher {
         let base_history_len = position.history.len();
 
         loop {
+            if pv.len() >= PV_WALK_MAX_DEPTH {
+                break;
+            }
+
             let key = position.zobrist_hash;
             if !seen.insert(key) {
                 break;
@@ -784,7 +840,7 @@ impl Searcher for AlphaBetaSearcher {
 #[derive(Debug, Clone, Copy)]
 struct AbortSearch;
 
-fn piece_value(piece: komugi_core::PieceType) -> i32 {
+pub fn piece_value(piece: komugi_core::PieceType) -> i32 {
     use komugi_core::PieceType;
 
     match piece {
@@ -833,6 +889,7 @@ mod tests {
 
         assert!(!result.pv.is_empty());
         assert_eq!(result.pv.first(), result.best_move.as_ref());
+        assert!(result.pv.len() <= PV_WALK_MAX_DEPTH);
     }
 
     #[test]
@@ -972,5 +1029,54 @@ mod tests {
             result.best_move.is_none(),
             "Should return None when all moves are excluded"
         );
+    }
+
+    #[test]
+    fn search_multi_pv_returns_unique_sorted_lines() {
+        let mut searcher = AlphaBetaSearcher::default();
+        let pos = Position::new(SetupMode::Beginner);
+
+        let result = searcher.search_multi_pv(
+            &pos,
+            SearchLimits {
+                depth: Some(2),
+                ..SearchLimits::default()
+            },
+            3,
+        );
+
+        assert!(result.lines.len() <= 3);
+
+        let mut seen_roots: Vec<Move> = Vec::new();
+        for line in &result.lines {
+            assert!(!line.moves.is_empty());
+            assert!(!seen_roots.contains(&line.moves[0]));
+            seen_roots.push(line.moves[0].clone());
+        }
+
+        for pair in result.lines.windows(2) {
+            assert!(pair[0].score >= pair[1].score);
+        }
+
+        let summed_nodes: u64 = result.lines.iter().map(|line| line.nodes).sum();
+        assert_eq!(result.total_nodes, summed_nodes);
+    }
+
+    #[test]
+    fn search_multi_pv_zero_count_returns_empty() {
+        let mut searcher = AlphaBetaSearcher::default();
+        let pos = Position::new(SetupMode::Beginner);
+
+        let result = searcher.search_multi_pv(
+            &pos,
+            SearchLimits {
+                depth: Some(2),
+                ..SearchLimits::default()
+            },
+            0,
+        );
+
+        assert!(result.lines.is_empty());
+        assert_eq!(result.total_nodes, 0);
     }
 }

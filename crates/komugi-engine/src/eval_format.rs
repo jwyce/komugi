@@ -34,6 +34,8 @@ pub fn format_score(score: i32) -> String {
         } else {
             format!("-M{}", -n)
         }
+    } else if score == 0 {
+        "0.00".to_string()
     } else {
         let centipawns = score as f64 / 100.0;
         if centipawns >= 0.0 {
@@ -94,7 +96,7 @@ mod tests {
         // Regular scores
         assert_eq!(format_score(150), "+1.50");
         assert_eq!(format_score(-150), "-1.50");
-        assert_eq!(format_score(0), "+0.00");
+        assert_eq!(format_score(0), "0.00");
         assert_eq!(format_score(32), "+0.32");
         assert_eq!(format_score(-32), "-0.32");
     }
