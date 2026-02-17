@@ -5,6 +5,9 @@ pub mod encoding;
 pub mod mcts;
 #[cfg(feature = "neural")]
 pub mod neural;
+pub mod nnue;
+pub mod nnue_features;
+pub mod nnue_format;
 pub mod selfplay;
 pub mod tt;
 
@@ -20,5 +23,8 @@ pub use encoding::{
 pub use mcts::{MctsConfig, MctsSearcher};
 #[cfg(feature = "neural")]
 pub use neural::{GpuBatchPolicy, GpuInferencePool, NeuralPolicy};
+pub use nnue::NnueEval;
+pub use nnue_features::{extract_features, TOTAL_FEATURES};
+pub use nnue_format::{NnueError, NnueParams, QA, QB, SCALE};
 pub use selfplay::{play_game, GameRecord, GameResult, SelfPlayConfig, TrainingRecord};
 pub use tt::{Bound, Entry as TTEntry, TranspositionTable};

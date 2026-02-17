@@ -9,8 +9,11 @@ use komugi_core::{
     search::SearchLimits,
     types::{Color, MoveType, SetupMode},
 };
-use komugi_engine::{AlphaBetaConfig, AlphaBetaSearcher, ClassicalEval};
+use komugi_engine::{AlphaBetaConfig, AlphaBetaSearcher, ClassicalEval, NnueEval};
 use serde::Serialize;
+
+/// Embedded NNUE model (3.5MB placeholder)
+static NNUE_BYTES: &[u8] = include_bytes!("../../../models/gungi.nnue");
 
 /// Initialize panic hook for readable error messages in browser console.
 #[wasm_bindgen(start)]
@@ -48,7 +51,7 @@ fn tiered_square_str(ts: &komugi_core::types::TieredSquare) -> String {
 pub struct KomugiEngine {
     game: Gungi,
     searcher: AlphaBetaSearcher,
-    evaluator: ClassicalEval,
+    evaluator: Box<dyn Evaluator>,
 }
 
 #[wasm_bindgen]
@@ -61,7 +64,21 @@ impl KomugiEngine {
         Ok(Self {
             game: Gungi::new(setup),
             searcher: AlphaBetaSearcher::new(AlphaBetaConfig::default()),
-            evaluator: ClassicalEval::new(),
+            evaluator: Box::new(ClassicalEval::new()),
+        })
+    }
+
+    /// Create a new game with NNUE evaluator.
+    #[wasm_bindgen(js_name = "newWithNnue")]
+    pub fn new_with_nnue(mode: u8) -> Result<KomugiEngine, JsError> {
+        let setup =
+            SetupMode::from_code(mode).ok_or_else(|| JsError::new("invalid mode: expected 0-3"))?;
+        let nnue = NnueEval::from_bytes(NNUE_BYTES)
+            .map_err(|e| JsError::new(&format!("NNUE load failed: {:?}", e)))?;
+        Ok(Self {
+            game: Gungi::new(setup),
+            searcher: AlphaBetaSearcher::new(AlphaBetaConfig::default()),
+            evaluator: Box::new(nnue),
         })
     }
 
@@ -72,7 +89,7 @@ impl KomugiEngine {
         Ok(Self {
             game,
             searcher: AlphaBetaSearcher::new(AlphaBetaConfig::default()),
-            evaluator: ClassicalEval::new(),
+            evaluator: Box::new(ClassicalEval::new()),
         })
     }
 
@@ -134,6 +151,12 @@ impl KomugiEngine {
         self.evaluator.evaluate(&position).0
     }
 
+    /// Evaluate using NNUE (if initialized with newWithNnue).
+    #[wasm_bindgen(js_name = "evaluateNnue")]
+    pub fn evaluate_nnue(&self) -> i32 {
+        self.evaluate()
+    }
+
     /// Search for the best move at the given depth. Returns SAN notation.
     #[wasm_bindgen(js_name = "bestMove")]
     pub fn best_move(&mut self, depth: u8) -> Result<String, JsError> {
@@ -151,6 +174,12 @@ impl KomugiEngine {
             Some(mv) => Ok(move_to_san(&mv)),
             None => Err(JsError::new("no legal moves")),
         }
+    }
+
+    /// Search for best move using NNUE evaluator.
+    #[wasm_bindgen(js_name = "bestMoveNnue")]
+    pub fn best_move_nnue(&mut self, depth: u8) -> Result<String, JsError> {
+        self.best_move(depth)
     }
 
     /// Returns true if the game is over.

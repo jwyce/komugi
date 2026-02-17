@@ -11,6 +11,7 @@ neural = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 komugi-core = { path = "../komugi-core" }
+crossbeam = "0.8"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,3 +28,7 @@ path = "src/bin/selfplay.rs"
 [[bin]]
 name = "arena"
 path = "src/bin/arena.rs"
+
+[[bin]]
+name = "nnue_features"
+path = "src/bin/nnue_features.rs"

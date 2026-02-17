@@ -113,6 +113,10 @@ impl Gungi {
         self.position.fen()
     }
 
+    pub fn position(&self) -> &Position {
+        &self.position
+    }
+
     pub fn board(&self) -> &crate::board::Board {
         &self.position.board
     }
