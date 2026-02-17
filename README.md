@@ -20,6 +20,24 @@ komugi-engine/    Search (alpha-beta + MCTS), classical eval, NNUE eval,
 komugi-wasm/      WASM bindings for the browser. Powers gungi.io.
 ```
 
+## WASM Analysis API (Current)
+
+`komugi-wasm` now exposes post-game analysis APIs for game review:
+
+- `analyzePosition(depth, numPv)`
+  - Returns top-N PV lines, centipawn score, mate-in-N, display score, win %.
+- `classifyMove(san, depth, numPv)`
+  - Returns Chess.com-style move class (`Brilliant`, `Great`, `Best`, `Excellent`, `Good`, `Miss`, `Inaccuracy`, `Mistake`, `Blunder`) with eval context.
+- `analyzeGame(movesJson, depth, numPv)`
+  - Returns per-move classifications plus `whiteAccuracy` / `blackAccuracy`.
+
+Evaluator wiring is ready for both classical and NNUE paths:
+
+- `new(mode)` / `loadFen(fen)` → classical evaluator
+- `newWithNnue(mode)` / `loadFenWithNnue(fen)` → NNUE evaluator
+
+The API surface is stable; evaluator quality depends on the current model.
+
 ## Game Modes
 
 | Mode             | Description                                              |
@@ -49,6 +67,18 @@ Run tests:
 
 ```sh
 cargo test -p komugi-core -p komugi-engine
+```
+
+Check WASM crate:
+
+```sh
+cargo check -p komugi-wasm
+```
+
+Check wasm32 target build:
+
+```sh
+cargo check -p komugi-wasm --target wasm32-unknown-unknown
 ```
 
 Run self-play:
