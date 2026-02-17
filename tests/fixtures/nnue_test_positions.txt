@@ -1,0 +1,39 @@
+# NNUE Test Fixtures - Cross-Validation Positions
+# Format: FEN string (one per line)
+# Comment lines start with #
+
+# 1. Starting position (beginner mode)
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3GMI3 J2N2S1R1D1/j2n2s1r1d1 w 1 - 1
+
+# 2. Starting position (advanced mode)
+9/9/9/9/9/9/9/9/9 M1G1I1J2W2N3R2S2F2D4C1A2K1T1/m1g1i1j2w2n3r2s2f2d4c1a2k1t1 w 3 wb 1
+
+# 3. Mid-game with mixed tiers (pieces on board, some in hand)
+3img3/1ra1n1as1/d1fwdwf1d/9/4w4/9/D1FWDWF1D/1SA1N1AR1/3GMI3 J2N2S1R1D1/j2n2s1r1d1 b 1 - 3
+
+# 4. Position with pieces in hand (thermometer test - full hand)
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3GMI3 J2N2S1R1D1A1F1C1/j2n2s1r1d1a1f1c1 w 1 - 1
+
+# 5. Position with empty hand (all pieces on board or captured)
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3GMI3 -/- w 1 - 1
+
+# 6. Position with marshal on tier 2 (stacking scenario)
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3|G:M:I|5 J2N2S1R1D1/j2n2s1r1d1 w 1 - 1
+
+# 7. Asymmetric position (different piece counts per side)
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3GMI3 J2N2S1R1D1/j2n2s1r1 w 1 - 1
+
+# 8. Near-endgame (few pieces remaining)
+3img3/9/9/9/9/9/9/1SA1N1AR1/3GMI3 J2N2S1R1D1/j2n2s1r1d1 w 1 - 5
+
+# 9. Draft phase position (intermediate mode, drafting active)
+9/9/9/9/9/9/9/9/9 M1G1I1J2W2N3R2S2F2D4C1A2K1T1/m1g1i1j2w2n3r2s2f2d4c1a2k1t1 w 2 wb 1
+
+# 10. Position with maximum stacking (3 tiers filled on multiple squares)
+3img3/1|r:a:n|1as4/|d:f:w|dwf4d/9/9/9/|D:F:W|DWF4D/1SA1N1AR1/3GMI3 J2N2S1R1D1/j2n2s1r1d1 w 1 - 1
+
+# 11. Advanced mode with tier 3 pieces and stacking
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3|G:M:I|5 M1G1I1J2W2N3R2S2F2D4C1A2K1T1/m1g1i1j2w2n3r2s2f2d4c1a2k1t1 w 3 - 1
+
+# 12. Position with asymmetric hand (one side has more pieces)
+3img3/1ra1n1as1/d1fwdwf1d/9/9/9/D1FWDWF1D/1SA1N1AR1/3GMI3 J2N2S1R1D1A1F1C1/j2n2s1r1d1 b 1 - 2

@@ -13,9 +13,9 @@ Generates and validates legal moves, evaluates positions, and trains via self-pl
 komugi-core/      Game logic, move generation, FEN/SAN, position representation.
                   Zero-allocation hot paths.
 
-komugi-engine/    Search (alpha-beta + MCTS), classical eval, neural network
-                  inference (ONNX), self-play data generation, position encoding
-                  (119 planes).
+komugi-engine/    Search (alpha-beta + MCTS), classical eval, NNUE eval,
+                  neural network inference (ONNX), self-play data generation,
+                  position encoding (119 planes), NNUE feature encoding.
 
 komugi-wasm/      WASM bindings for the browser. Powers gungi.io.
 ```
@@ -98,6 +98,8 @@ Repeat steps 2-4 for each generation.
 
 ## Neural Network
 
+### ResNet (Teacher)
+
 ResNet architecture:
 
 - 10 residual blocks, 128 channels
@@ -105,6 +107,15 @@ ResNet architecture:
 - Input: 119 planes on a 9x9 board
 - Policy head: 7695 output dimensions
 - Value head: scalar win probability
+
+### NNUE (Student)
+
+After training, the ResNet is distilled into a smaller NNUE (Efficiently Updatable Neural Network) for client-side inference:
+
+- Architecture: ~7K features → 256 → 32 → 1
+- Quantized: int16 L0, int8 L1/L2
+- Size: ~3.5MB (embedded in WASM)
+- Inference: pure Rust, no ONNX runtime
 
 ## Position Encoding
 
