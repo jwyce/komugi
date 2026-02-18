@@ -159,7 +159,7 @@ impl Evaluator for ClassicalEval {
                 continue;
             }
             let val = piece_value(hp.piece_type) * i32::from(hp.count);
-            let hand_val = val;
+            let hand_val = (val * 11) / 10;
             match hp.color {
                 Color::White => white_score += hand_val,
                 Color::Black => black_score += hand_val,
