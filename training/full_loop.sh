@@ -19,6 +19,8 @@ THREADS=$(nproc)
 NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 NUM_GPUS=${NUM_GPUS:-1}
 [ "$NUM_GPUS" -lt 1 ] && NUM_GPUS=1
+BEST_CKPT_POLICY_WEIGHT="${BEST_CKPT_POLICY_WEIGHT:-1.0}"
+BEST_CKPT_VALUE_WEIGHT="${BEST_CKPT_VALUE_WEIGHT:-1.0}"
 
 PHASES=(
     "beginner:10"
@@ -46,6 +48,54 @@ echo ""
 GLOBAL_GEN=0
 PREV_MODEL=""
 PREV_PHASE=""
+
+select_best_checkpoint() {
+    local ckpt_dir="$1"
+    local metrics_file="$ckpt_dir/metrics.csv"
+    python3 - "$ckpt_dir" "$metrics_file" "$BEST_CKPT_POLICY_WEIGHT" "$BEST_CKPT_VALUE_WEIGHT" <<'PY'
+import csv
+import math
+import os
+import sys
+
+ckpt_dir, metrics_file, policy_w, value_w = sys.argv[1:5]
+policy_w = float(policy_w)
+value_w = float(value_w)
+
+if not os.path.exists(metrics_file):
+    print("")
+    raise SystemExit(0)
+
+best_score = math.inf
+best_path = ""
+
+with open(metrics_file, newline="", encoding="utf-8") as fh:
+    reader = csv.DictReader(fh)
+    for row in reader:
+        epoch_raw = (row.get("epoch") or "").strip()
+        val_policy_raw = (row.get("val_policy_loss") or "").strip()
+        val_value_raw = (row.get("val_value_loss") or "").strip()
+        if not epoch_raw or not val_policy_raw or not val_value_raw:
+            continue
+        try:
+            epoch = int(float(epoch_raw))
+            val_policy = float(val_policy_raw)
+            val_value = float(val_value_raw)
+        except ValueError:
+            continue
+        if not (math.isfinite(val_policy) and math.isfinite(val_value)):
+            continue
+        candidate = os.path.join(ckpt_dir, f"model_epoch_{epoch}.pt")
+        if not os.path.exists(candidate):
+            continue
+        score = policy_w * val_policy + value_w * val_value
+        if score < best_score:
+            best_score = score
+            best_path = candidate
+
+print(best_path)
+PY
+}
 
 run_generation() {
     local mode="$1"
@@ -101,7 +151,10 @@ run_generation() {
         local prev_ckpt_dir="$CHECKPOINTS_DIR/$prev_gen_label"
         if [ -d "$prev_ckpt_dir" ]; then
             local prev_ckpt
-            prev_ckpt=$(ls -t "$prev_ckpt_dir"/model_epoch_*.pt 2>/dev/null | head -1 || true)
+            prev_ckpt=$(select_best_checkpoint "$prev_ckpt_dir")
+            if [ -z "$prev_ckpt" ]; then
+                prev_ckpt=$(ls -t "$prev_ckpt_dir"/model_epoch_*.pt 2>/dev/null | head -1 || true)
+            fi
             if [ -n "$prev_ckpt" ] && [ -f "$prev_ckpt" ]; then
                 resume_flag="--resume $prev_ckpt"
                 echo "Warm-starting from $prev_ckpt"
@@ -140,9 +193,15 @@ run_generation() {
     local train_elapsed=$((SECONDS - train_start))
     echo "Training done in ${train_elapsed}s"
 
-    local final_ckpt="$ckpt_dir/model_epoch_${EPOCHS}.pt"
-    if [ ! -f "$final_ckpt" ]; then
-        final_ckpt=$(ls -t "$ckpt_dir"/model_epoch_*.pt 2>/dev/null | head -1)
+    local final_ckpt
+    final_ckpt=$(select_best_checkpoint "$ckpt_dir")
+    if [ -n "$final_ckpt" ] && [ -f "$final_ckpt" ]; then
+        echo "Selected best checkpoint from validation metrics: $final_ckpt"
+    else
+        final_ckpt="$ckpt_dir/model_epoch_${EPOCHS}.pt"
+        if [ ! -f "$final_ckpt" ]; then
+            final_ckpt=$(ls -t "$ckpt_dir"/model_epoch_*.pt 2>/dev/null | head -1)
+        fi
     fi
 
     if [ -z "$final_ckpt" ] || [ ! -f "$final_ckpt" ]; then
