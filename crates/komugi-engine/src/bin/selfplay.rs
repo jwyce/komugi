@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use komugi_core::{Policy, SetupMode};
+use komugi_core::{parse_fen, Color, Policy, SetupMode};
 use komugi_engine::mcts::{HeuristicPolicy, MctsConfig};
 #[cfg(feature = "neural")]
 use komugi_engine::neural::GpuInferencePool;
@@ -53,12 +53,29 @@ fn format_pgn(game_num: u32, record: &GameRecord, mode: SetupMode) -> String {
     pgn.push_str(&format!("[Result \"{result_str}\"]\n"));
     pgn.push_str(&format!("[PlyCount \"{}\"]\n\n", record.total_moves));
 
+    let mut next_move_number = 1u32;
+    let mut prev_turn: Option<Color> = None;
     for (i, san) in record.moves.iter().enumerate() {
-        if i % 2 == 0 {
-            pgn.push_str(&format!("{}. ", i / 2 + 1));
+        let current_turn = record
+            .positions
+            .get(i)
+            .and_then(|position| parse_fen(&position.fen).ok())
+            .map(|parsed| parsed.turn)
+            .unwrap_or(if i % 2 == 0 {
+                Color::White
+            } else {
+                Color::Black
+            });
+
+        let should_print_number = current_turn == Color::White && prev_turn != Some(Color::White);
+
+        if should_print_number {
+            pgn.push_str(&format!("{}. ", next_move_number));
+            next_move_number = next_move_number.saturating_add(1);
         }
         pgn.push_str(san);
         pgn.push(' ');
+        prev_turn = Some(current_turn);
     }
     pgn.push_str(result_str);
     pgn.push('\n');
@@ -200,4 +217,57 @@ fn main() {
 
     eprintln!("Done. Wrote {num_games} games to {output_file}");
     eprintln!("PGN: {pgn_path}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_pgn;
+    use komugi_core::SetupMode;
+    use komugi_engine::{GameRecord, GameResult, TrainingRecord};
+
+    fn rec(fen: &str) -> TrainingRecord {
+        TrainingRecord {
+            fen: fen.to_string(),
+            played_move: String::new(),
+            policy: Vec::new(),
+            outcome: 0.0,
+            move_number: 1,
+            encoding: Vec::new(),
+        }
+    }
+
+    fn rec_turn(turn: char, drafting: &str) -> TrainingRecord {
+        rec(&format!("9/9/9/9/9/9/9/9/9 -/- {turn} 2 {drafting} 1"))
+    }
+
+    #[test]
+    fn format_pgn_numbers_by_white_turn_segments() {
+        let record = GameRecord {
+            positions: vec![
+                rec_turn('w', "wb"),
+                rec_turn('b', "wb"),
+                rec_turn('w', "b"),
+                rec_turn('b', "b"),
+                rec_turn('b', "b"),
+                rec_turn('b', "b"),
+                rec_turn('w', "-"),
+                rec_turn('b', "-"),
+            ],
+            result: GameResult::Draw,
+            total_moves: 8,
+            moves: vec![
+                "w1".to_string(),
+                "b1".to_string(),
+                "w2".to_string(),
+                "b2".to_string(),
+                "b3".to_string(),
+                "b4".to_string(),
+                "w3".to_string(),
+                "b5".to_string(),
+            ],
+        };
+
+        let pgn = format_pgn(1, &record, SetupMode::Intermediate);
+        assert!(pgn.contains("1. w1 b1 2. w2 b2 b3 b4 3. w3 b5"));
+    }
 }

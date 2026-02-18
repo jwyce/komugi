@@ -109,7 +109,21 @@ impl Position {
 
         self.apply_move(mv, &mut entry)?;
         self.history.push(entry);
-        self.turn = opposite(self.turn);
+
+        let mut next_turn = self.turn;
+        if self.drafting_rights[color_idx(Color::White)]
+            == self.drafting_rights[color_idx(Color::Black)]
+        {
+            if !(mv.draft_finished && self.turn == Color::White) {
+                next_turn = opposite(self.turn);
+            }
+        } else if !self.drafting_rights[color_idx(Color::Black)] && self.turn == Color::Black {
+            next_turn = Color::White;
+        } else if !self.drafting_rights[color_idx(Color::White)] && self.turn == Color::White {
+            next_turn = Color::Black;
+        }
+
+        self.turn = next_turn;
         zobrist_keys().xor_side_to_move(&mut self.zobrist_hash);
         self.move_number = self.move_number.saturating_add(1);
         self.increment_repetition(self.zobrist_hash);

@@ -19,6 +19,21 @@ fn mcts_returns_legal_move() {
 }
 
 #[test]
+fn mcts_returns_legal_move_in_intermediate_draft() {
+    let position = Position::new(SetupMode::Intermediate);
+    let mut searcher = MctsSearcher::new(MctsConfig {
+        max_simulations: 100,
+        ..MctsConfig::default()
+    });
+
+    let result = searcher.search_with_policy(&position, SearchLimits::default(), &HeuristicPolicy);
+
+    let best_move = result.best_move.expect("MCTS should return a draft move");
+    assert!(position.moves().iter().any(|mv| mv == &best_move));
+    assert!(result.nodes_searched > 0);
+}
+
+#[test]
 fn mcts_finds_winning_capture() {
     let position = Position::from_fen("8m/9/9/9/4Gd3/9/9/9/M8 -/- w 3 - 1").unwrap();
     let legal_moves = position.moves();

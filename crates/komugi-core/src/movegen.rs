@@ -183,6 +183,9 @@ pub fn generate_all_legal_moves_in_state(state: &ParsedFen) -> MoveList {
     let marshal_square = find_marshal_square(&board, state.turn);
     let mut moves =
         generate_all_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand), true);
+    if state.drafting[state.turn as usize] {
+        moves.clear();
+    }
     for hand_piece in state
         .hand
         .iter()
@@ -207,6 +210,9 @@ pub fn generate_all_pseudo_legal_moves_in_state(state: &ParsedFen) -> MoveList {
     let marshal_square = find_marshal_square(&board, state.turn);
     let mut moves =
         generate_all_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand), false);
+    if state.drafting[state.turn as usize] {
+        moves.clear();
+    }
     for hand_piece in state
         .hand
         .iter()
@@ -236,6 +242,9 @@ pub fn generate_all_legal_moves_from_position(position: &Position) -> MoveList {
         Some(&position.hand),
         true,
     );
+    if position.drafting_rights[position.turn as usize] {
+        moves.clear();
+    }
     for hand_piece in position
         .hand
         .iter()
@@ -265,6 +274,9 @@ pub fn generate_all_pseudo_legal_moves_from_position(position: &Position) -> Mov
         Some(&position.hand),
         false,
     );
+    if position.drafting_rights[position.turn as usize] {
+        moves.clear();
+    }
     for hand_piece in position
         .hand
         .iter()
@@ -502,10 +514,7 @@ fn append_arata_moves(
 
     let max_tier = max_tier_for_mode(ctx.mode);
     let mut ranks = ArrayVecRanks::new();
-    if ctx.drafting_rights[usize::from(hand_piece.color as u8)]
-        || ctx.drafting_rights[0]
-        || ctx.drafting_rights[1]
-    {
+    if ctx.drafting_rights[0] || ctx.drafting_rights[1] {
         if hand_piece.color == Color::White {
             ranks.extend([7, 8, 9]);
         } else {

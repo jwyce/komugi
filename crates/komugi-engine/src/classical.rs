@@ -77,6 +77,11 @@ const TOWER_HEIGHT_BONUS: [i32; 4] = [0, 0, 15, 35];
 /// Bonus per friendly piece adjacent to marshal.
 const MARSHAL_SHIELD_BONUS: i32 = 10;
 
+const HAND_MULTIPLIER_DRAFT_MILLI: i32 = 1000;
+const HAND_MULTIPLIER_POST_BASE_MILLI: i32 = 1200;
+const HAND_MULTIPLIER_POST_MAX_MILLI: i32 = 1400;
+const LOW_HAND_RAMP_START: i32 = 6;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ClassicalEval;
 
@@ -154,12 +159,32 @@ impl Evaluator for ClassicalEval {
         white_score += marshal_safety(board, Color::White, white_marshal_sq);
         black_score += marshal_safety(board, Color::Black, black_marshal_sq);
 
+        let white_hand_count: i32 = position
+            .hand
+            .iter()
+            .filter(|hp| hp.color == Color::White)
+            .map(|hp| i32::from(hp.count))
+            .sum();
+        let black_hand_count: i32 = position
+            .hand
+            .iter()
+            .filter(|hp| hp.color == Color::Black)
+            .map(|hp| i32::from(hp.count))
+            .sum();
+
+        let in_draft = position.in_draft();
+        let white_hand_multiplier = hand_multiplier_milli(white_hand_count, in_draft);
+        let black_hand_multiplier = hand_multiplier_milli(black_hand_count, in_draft);
+
         for hp in position.hand.iter() {
             if hp.count == 0 {
                 continue;
             }
             let val = piece_value(hp.piece_type) * i32::from(hp.count);
-            let hand_val = (val * 11) / 10;
+            let hand_val = match hp.color {
+                Color::White => (val * white_hand_multiplier) / 1000,
+                Color::Black => (val * black_hand_multiplier) / 1000,
+            };
             match hp.color {
                 Color::White => white_score += hand_val,
                 Color::Black => black_score += hand_val,
@@ -168,6 +193,21 @@ impl Evaluator for ClassicalEval {
 
         Score(white_score - black_score)
     }
+}
+
+fn hand_multiplier_milli(remaining_hand_count: i32, in_draft: bool) -> i32 {
+    if in_draft {
+        return HAND_MULTIPLIER_DRAFT_MILLI;
+    }
+
+    if remaining_hand_count >= LOW_HAND_RAMP_START {
+        return HAND_MULTIPLIER_POST_BASE_MILLI;
+    }
+
+    let clamped = remaining_hand_count.max(0);
+    let depletion = LOW_HAND_RAMP_START - clamped;
+    let ramp = HAND_MULTIPLIER_POST_MAX_MILLI - HAND_MULTIPLIER_POST_BASE_MILLI;
+    HAND_MULTIPLIER_POST_BASE_MILLI + (ramp * depletion) / LOW_HAND_RAMP_START
 }
 
 #[inline]

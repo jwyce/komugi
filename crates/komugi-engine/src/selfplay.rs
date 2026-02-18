@@ -118,6 +118,10 @@ pub fn play_game(config: &SelfPlayConfig) -> GameRecord {
 }
 
 fn infer_result(position: &Position, reached_max_moves: bool) -> GameResult {
+    if position.in_draft() {
+        return GameResult::Draw;
+    }
+
     if reached_max_moves || position.is_draw() {
         return GameResult::Draw;
     }

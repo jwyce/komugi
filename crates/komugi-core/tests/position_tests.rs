@@ -1,8 +1,8 @@
 use komugi_core::fen::parse_fen;
 use komugi_core::san::parse_san;
 use komugi_core::{
-    is_marshal_captured, Gungi, Move, MoveType, PieceType, Position, PositionError, SetupMode,
-    Square,
+    is_marshal_captured, Color, Gungi, Move, MoveType, PieceType, Position, PositionError,
+    SetupMode, Square,
 };
 
 fn find_move(
@@ -155,6 +155,95 @@ fn draft_move_generation_marks_end_moves() {
     let many_left_moves = many_left.moves();
     assert!(many_left_moves.iter().any(|mv| mv.draft_finished));
     assert!(many_left_moves.iter().any(|mv| !mv.draft_finished));
+}
+
+#[test]
+fn intermediate_draft_rank_restrictions_match_rules() {
+    let mut gungi = Gungi::new(SetupMode::Intermediate);
+
+    let white_moves = gungi.moves();
+    assert!(!white_moves.is_empty());
+    assert!(white_moves
+        .iter()
+        .all(|mv| { mv.move_type == MoveType::Arata && (7..=9).contains(&mv.to.square.rank) }));
+
+    let white_end = white_moves
+        .iter()
+        .find(|mv| mv.draft_finished)
+        .cloned()
+        .expect("white should have at least one draft-ending move");
+    gungi.make_move(&white_end).unwrap();
+
+    let black_moves = gungi.moves();
+    assert!(!black_moves.is_empty());
+    assert!(black_moves
+        .iter()
+        .all(|mv| { mv.move_type == MoveType::Arata && (1..=3).contains(&mv.to.square.rank) }));
+}
+
+#[test]
+fn once_white_done_only_black_setup_moves_are_legal_until_black_done() {
+    let mut gungi = Gungi::new(SetupMode::Intermediate);
+
+    for san in ["新帥(9-3-1)終", "新帥(2-9-1)"] {
+        let parsed = parse_fen(&gungi.fen()).unwrap();
+        let mv = parse_san(san, &parsed).unwrap();
+        gungi.make_move(&mv).unwrap();
+    }
+
+    assert!(gungi.position().in_draft());
+    assert_eq!(gungi.position().drafting_rights, [false, true]);
+
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let white_move = parse_san("新謀(8-4-1)", &parsed);
+    assert!(
+        white_move.is_err(),
+        "after White ends draft, White setup moves should be illegal until Black also ends"
+    );
+}
+
+#[test]
+fn draft_done_side_does_not_get_setup_turns_until_both_done() {
+    let mut gungi = Gungi::new(SetupMode::Intermediate);
+
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let white_done = parse_san("新帥(9-3-1)終", &parsed).unwrap();
+    gungi.make_move(&white_done).unwrap();
+
+    assert_eq!(gungi.turn(), Color::Black);
+    assert_eq!(gungi.position().drafting_rights, [false, true]);
+
+    let black_non_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| !mv.draft_finished)
+        .cloned()
+        .expect("black should have a non-ending draft move");
+    gungi.make_move(&black_non_done).unwrap();
+
+    assert_eq!(gungi.turn(), Color::Black);
+    assert!(gungi.position().in_draft());
+    assert_eq!(gungi.position().drafting_rights, [false, true]);
+    assert!(gungi.moves().iter().all(|mv| mv.color == Color::Black));
+    assert!(gungi
+        .moves()
+        .iter()
+        .all(|mv| mv.move_type == MoveType::Arata));
+}
+
+#[test]
+fn post_draft_arata_is_limited_by_frontmost_piece_rank() {
+    let gungi = Gungi::from_fen("4m4/9/9/9/9/4M4/9/9/9 D1/- w 3 - 1").unwrap();
+    let moves = gungi.moves();
+
+    let arata: Vec<_> = moves
+        .iter()
+        .filter(|mv| mv.move_type == MoveType::Arata)
+        .collect();
+    assert!(!arata.is_empty());
+
+    assert!(arata.iter().all(|mv| (6..=9).contains(&mv.to.square.rank)));
+    assert!(arata.iter().all(|mv| mv.to.square.rank != 5));
 }
 
 #[test]

@@ -508,6 +508,9 @@ impl MctsSearcher {
     }
 
     fn is_terminal_position(&self, position: &Position) -> bool {
+        if position.in_draft() {
+            return false;
+        }
         is_marshal_captured(position) || position.is_checkmate() || position.is_draw()
     }
 

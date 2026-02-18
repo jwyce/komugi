@@ -128,3 +128,34 @@ fn evaluator_trait_object_works() {
     let score = evaluator.evaluate(&pos);
     assert!(score.0.abs() <= 50);
 }
+
+#[test]
+fn hand_bonus_is_neutral_during_draft_and_boosted_post_draft() {
+    let draft_fen = "4m4/9/9/9/9/9/9/9/4M4 G1/- w 2 wb 1";
+    let post_fen = "4m4/9/9/9/9/9/9/9/4M4 G1/- w 2 - 1";
+
+    let draft_score = eval(&Position::from_fen(draft_fen).unwrap());
+    let post_score = eval(&Position::from_fen(post_fen).unwrap());
+
+    assert!(
+        post_score > draft_score,
+        "post-draft hand bonus should exceed draft: draft={draft_score} post={post_score}"
+    );
+}
+
+#[test]
+fn low_remaining_hand_gets_stronger_multiplier() {
+    let low_hand = "4m4/9/9/9/9/9/9/9/4M4 G1/- w 2 - 1";
+    let high_hand = "4m4/9/9/9/9/9/9/9/4M4 G1D5/- w 2 - 1";
+
+    let low = eval(&Position::from_fen(low_hand).unwrap());
+    let high = eval(&Position::from_fen(high_hand).unwrap());
+
+    let low_delta = low;
+    let high_delta = high - 5 * 100;
+
+    assert!(
+        low_delta > high_delta,
+        "low hand should get stronger per-piece multiplier: low={low_delta} high_adjusted={high_delta}"
+    );
+}
