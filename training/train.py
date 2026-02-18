@@ -314,6 +314,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to checkpoint .pt file to resume/warm-start from",
     )
     parser.add_argument(
+        "--resume-optimizer-state",
+        action="store_true",
+        help="When resuming, also restore optimizer/scheduler state (default: weights only)",
+    )
+    parser.add_argument(
         "--metrics-file",
         default=None,
         help="Path to CSV file for metrics logging (default: {output_dir}/metrics.csv)",
@@ -416,17 +421,22 @@ def main() -> None:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
         raw_model = model.module if use_ddp else model
         raw_model.load_state_dict(checkpoint["model_state_dict"])
-        if "optimizer_state_dict" in checkpoint:
+        if args.resume_optimizer_state and "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
+        if args.resume_optimizer_state and "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         resumed_epoch = checkpoint.get("epoch", 0)
         # Warm-start: load weights but reset epoch counter (training on new data)
         start_epoch = 1
         if is_main_process():
-            print(
-                f"resumed from {args.resume} (epoch {resumed_epoch}), resetting to epoch 1"
-            )
+            if args.resume_optimizer_state:
+                print(
+                    f"resumed from {args.resume} (epoch {resumed_epoch}) with optimizer/scheduler state, resetting to epoch 1"
+                )
+            else:
+                print(
+                    f"resumed weights from {args.resume} (epoch {resumed_epoch}), reinitializing optimizer/scheduler and resetting to epoch 1"
+                )
 
     if is_main_process():
         csv_file = open(metrics_file, "a" if metrics_file_exists else "w", newline="")
@@ -444,6 +454,9 @@ def main() -> None:
             )
             csv_file.flush()
 
+    if is_main_process() and (csv_file is None or csv_writer is None):
+        raise RuntimeError("failed to initialize CSV metrics writer")
+
     for epoch in range(start_epoch, args.epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -459,6 +472,8 @@ def main() -> None:
             val_policy_loss, val_value_loss = evaluate(model, val_loader, device)
 
         if is_main_process():
+            assert csv_writer is not None
+            assert csv_file is not None
             message = (
                 f"epoch={epoch} "
                 f"train_policy_loss={train_policy_loss:.6f} "
@@ -503,6 +518,7 @@ def main() -> None:
                 print(f"saved checkpoint: {path}")
 
     if is_main_process():
+        assert csv_file is not None
         csv_file.close()
         if writer is not None:
             writer.close()
