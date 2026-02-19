@@ -65,7 +65,7 @@ impl Position {
     }
 
     pub fn is_fourfold_repetition(&self) -> bool {
-        self.repetition_count(self.zobrist_hash) >= 4
+        self.repetition_count(self.board_repetition_hash) >= 4
     }
 
     pub fn is_draw(&self) -> bool {

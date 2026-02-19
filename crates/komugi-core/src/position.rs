@@ -4,6 +4,7 @@ use arrayvec::ArrayVec;
 use thiserror::Error;
 
 use crate::board::{Board, BoardError, Tower};
+use crate::constants::SQUARES;
 use crate::fen::{
     encode_fen, parse_fen, ParsedFen, ADVANCED_POSITION, BEGINNER_POSITION, INTERMEDIATE_POSITION,
     INTRO_POSITION,
@@ -39,6 +40,7 @@ pub struct HistoryEntry {
     pub drafting_rights: [bool; 2],
     pub move_number: u32,
     pub zobrist_hash: u64,
+    pub board_repetition_hash: u64,
     pub hand_piece_idx: Option<usize>,
     pub betrayal_hand_indices: ArrayVec<usize, 3>,
 }
@@ -53,6 +55,7 @@ pub struct Position {
     pub marshal_squares: [Option<Square>; 2],
     pub move_number: u32,
     pub zobrist_hash: u64,
+    pub board_repetition_hash: u64,
     pub history: Vec<HistoryEntry>,
     repetition_table: HashMap<u64, u8>,
 }
@@ -103,6 +106,7 @@ impl Position {
             drafting_rights: self.drafting_rights,
             move_number: self.move_number,
             zobrist_hash: self.zobrist_hash,
+            board_repetition_hash: self.board_repetition_hash,
             hand_piece_idx: None,
             betrayal_hand_indices: ArrayVec::new(),
         };
@@ -126,13 +130,13 @@ impl Position {
         self.turn = next_turn;
         zobrist_keys().xor_side_to_move(&mut self.zobrist_hash);
         self.move_number = self.move_number.saturating_add(1);
-        self.increment_repetition(self.zobrist_hash);
+        self.increment_repetition(self.board_repetition_hash);
         Ok(())
     }
 
     pub fn unmake_move(&mut self) -> Result<(), PositionError> {
         let entry = self.history.pop().ok_or(PositionError::EmptyHistory)?;
-        self.decrement_repetition(self.zobrist_hash);
+        self.decrement_repetition(self.board_repetition_hash);
 
         if let Some(from) = entry.mv.from {
             restore_tower(&mut self.board, from.square, entry.from_tower)?;
@@ -149,6 +153,7 @@ impl Position {
         self.drafting_rights = entry.drafting_rights;
         self.move_number = entry.move_number;
         self.zobrist_hash = entry.zobrist_hash;
+        self.board_repetition_hash = entry.board_repetition_hash;
         self.refresh_marshal_cache_for_square(entry.mv.to.square);
         if let Some(from) = entry.mv.from {
             self.refresh_marshal_cache_for_square(from.square);
@@ -173,7 +178,8 @@ impl Position {
             zobrist_keys().hash_position(&parsed.board, &parsed.hand, parsed.turn, parsed.drafting);
         let marshal_squares = find_marshal_squares(&parsed.board);
         let mut repetition_table = HashMap::new();
-        repetition_table.insert(hash, 1);
+        let board_repetition_hash = hash_board_for_repetition(&parsed.board);
+        repetition_table.insert(board_repetition_hash, 1);
         Self {
             board: parsed.board,
             hand: parsed.hand,
@@ -183,6 +189,7 @@ impl Position {
             marshal_squares,
             move_number: parsed.move_number,
             zobrist_hash: hash,
+            board_repetition_hash,
             history: Vec::new(),
             repetition_table,
         }
@@ -281,11 +288,13 @@ impl Position {
 
     fn update_square_hash(&mut self, square: Square, old_tower: Tower) {
         xor_tower(&mut self.zobrist_hash, square, old_tower);
+        xor_tower(&mut self.board_repetition_hash, square, old_tower);
         let new_tower = self
             .board
             .tower_copy(square)
             .expect("square from legal move must be in bounds");
         xor_tower(&mut self.zobrist_hash, square, new_tower);
+        xor_tower(&mut self.board_repetition_hash, square, new_tower);
     }
 
     fn refresh_marshal_cache_for_square(&mut self, square: Square) {
@@ -372,4 +381,34 @@ fn xor_tower(hash: &mut u64, square: Square, tower: Tower) {
 fn restore_tower(board: &mut Board, square: Square, tower: Tower) -> Result<(), PositionError> {
     board.set_tower(square, tower)?;
     Ok(())
+}
+
+fn hash_board_for_repetition(board: &Board) -> u64 {
+    let mut hash = 0u64;
+    for square in SQUARES {
+        if let Some(tower) = board.get(square) {
+            xor_tower(&mut hash, square, *tower);
+        }
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_repetition_hash_ignores_turn_and_hand() {
+        let fen_white = "m8/9/9/9/9/9/9/9/8M G1/- w 3 - 1";
+        let fen_black = "m8/9/9/9/9/9/9/9/8M -/g1 b 3 - 1";
+
+        let pos_white = Position::from_fen(fen_white).unwrap();
+        let pos_black = Position::from_fen(fen_black).unwrap();
+
+        assert_eq!(
+            pos_white.board_repetition_hash,
+            pos_black.board_repetition_hash
+        );
+        assert_ne!(pos_white.zobrist_hash, pos_black.zobrist_hash);
+    }
 }
