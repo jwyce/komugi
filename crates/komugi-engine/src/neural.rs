@@ -1,4 +1,5 @@
 use std::cell::UnsafeCell;
+use std::env;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -125,8 +126,49 @@ impl Evaluator for NeuralPolicy {
 // GPU batch inference server
 // ---------------------------------------------------------------------------
 
-const MAX_BATCH_SIZE: usize = 256;
-const BATCH_TIMEOUT: Duration = Duration::from_millis(2);
+const DEFAULT_MAX_BATCH_SIZE: usize = 256;
+const DEFAULT_BATCH_TIMEOUT_MS: u64 = 2;
+const DEFAULT_QUEUE_CAPACITY: usize = 512;
+const DEFAULT_WORKERS_PER_GPU: usize = 1;
+
+#[derive(Debug, Clone, Copy)]
+struct GpuPoolConfig {
+    max_batch_size: usize,
+    batch_timeout: Duration,
+    queue_capacity: usize,
+    workers_per_gpu: usize,
+}
+
+impl GpuPoolConfig {
+    fn from_env() -> Self {
+        let max_batch_size = env_usize("KOMUGI_GPU_MAX_BATCH", DEFAULT_MAX_BATCH_SIZE).max(1);
+        let batch_timeout_ms = env_u64("KOMUGI_GPU_BATCH_TIMEOUT_MS", DEFAULT_BATCH_TIMEOUT_MS);
+        let queue_capacity = env_usize("KOMUGI_GPU_QUEUE_CAPACITY", DEFAULT_QUEUE_CAPACITY).max(1);
+        let workers_per_gpu =
+            env_usize("KOMUGI_GPU_WORKERS_PER_GPU", DEFAULT_WORKERS_PER_GPU).max(1);
+
+        Self {
+            max_batch_size,
+            batch_timeout: Duration::from_millis(batch_timeout_ms),
+            queue_capacity,
+            workers_per_gpu,
+        }
+    }
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default)
+}
 
 struct InferenceRequest {
     encoding: Vec<f32>,
@@ -175,7 +217,11 @@ impl Evaluator for GpuBatchPolicy {
     }
 }
 
-fn gpu_inference_loop(rx: mpsc::Receiver<InferenceRequest>, mut session: Session) {
+fn gpu_inference_loop(
+    rx: mpsc::Receiver<InferenceRequest>,
+    mut session: Session,
+    cfg: GpuPoolConfig,
+) {
     loop {
         let first = match rx.recv() {
             Ok(req) => req,
@@ -183,8 +229,8 @@ fn gpu_inference_loop(rx: mpsc::Receiver<InferenceRequest>, mut session: Session
         };
 
         let mut batch = vec![first];
-        let deadline = Instant::now() + BATCH_TIMEOUT;
-        while batch.len() < MAX_BATCH_SIZE {
+        let deadline = Instant::now() + cfg.batch_timeout;
+        while batch.len() < cfg.max_batch_size {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
@@ -235,26 +281,37 @@ pub struct GpuInferencePool {
 
 impl GpuInferencePool {
     pub fn new(model_path: impl AsRef<Path>, num_gpus: usize) -> Result<Self, ort::Error> {
-        let mut senders = Vec::with_capacity(num_gpus);
+        let cfg = GpuPoolConfig::from_env();
+        let mut senders = Vec::with_capacity(num_gpus * cfg.workers_per_gpu);
         let model_path = model_path.as_ref();
 
         for gpu_id in 0..num_gpus {
-            let session = Session::builder()?
-                .with_execution_providers([CUDAExecutionProvider::default()
-                    .with_device_id(gpu_id as i32)
-                    .build()])?
-                .commit_from_file(model_path)?;
+            for worker_idx in 0..cfg.workers_per_gpu {
+                let session = Session::builder()?
+                    .with_execution_providers([CUDAExecutionProvider::default()
+                        .with_device_id(gpu_id as i32)
+                        .build()])?
+                    .commit_from_file(model_path)?;
 
-            let (tx, rx) = mpsc::sync_channel(512);
-            thread::Builder::new()
-                .name(format!("gpu-infer-{gpu_id}"))
-                .spawn(move || gpu_inference_loop(rx, session))
-                .expect("failed to spawn GPU inference thread");
+                let (tx, rx) = mpsc::sync_channel(cfg.queue_capacity);
+                let worker_cfg = cfg;
+                thread::Builder::new()
+                    .name(format!("gpu-infer-{gpu_id}-{worker_idx}"))
+                    .spawn(move || gpu_inference_loop(rx, session, worker_cfg))
+                    .expect("failed to spawn GPU inference thread");
 
-            senders.push(tx);
+                senders.push(tx);
+            }
         }
 
-        eprintln!("GPU batch inference pool: {num_gpus} GPUs, max_batch={MAX_BATCH_SIZE}");
+        eprintln!(
+            "GPU batch inference pool: {num_gpus} GPUs, workers_per_gpu={}, max_batch={}, timeout_ms={}, queue_capacity={} (total_workers={})",
+            cfg.workers_per_gpu,
+            cfg.max_batch_size,
+            cfg.batch_timeout.as_millis(),
+            cfg.queue_capacity,
+            senders.len()
+        );
         Ok(Self { senders })
     }
 

@@ -15,12 +15,15 @@ CHANNELS=128
 BATCH_SIZE=256
 LR=0.001
 MAX_MOVES=300
-THREADS=$(nproc)
+THREADS="${THREADS:-$(nproc)}"
 NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 NUM_GPUS=${NUM_GPUS:-1}
 [ "$NUM_GPUS" -lt 1 ] && NUM_GPUS=1
 BEST_CKPT_POLICY_WEIGHT="${BEST_CKPT_POLICY_WEIGHT:-1.0}"
 BEST_CKPT_VALUE_WEIGHT="${BEST_CKPT_VALUE_WEIGHT:-1.0}"
+SELFPLAY_SHARDS="${SELFPLAY_SHARDS:-1}"
+SELFPLAY_SHARD_THREADS="${SELFPLAY_SHARD_THREADS:-0}"
+SELFPLAY_GPUS_PER_SHARD="${SELFPLAY_GPUS_PER_SHARD:-0}"
 
 PHASES=(
     "beginner:10"
@@ -97,6 +100,163 @@ print(best_path)
 PY
 }
 
+gpu_list_for_shard() {
+    local start_idx="$1"
+    local count="$2"
+    local total="$3"
+    local out=""
+    local i
+    for ((i = 0; i < count; i++)); do
+        local gpu=$(( (start_idx + i) % total ))
+        if [ -z "$out" ]; then
+            out="$gpu"
+        else
+            out="$out,$gpu"
+        fi
+    done
+    printf '%s\n' "$out"
+}
+
+renumber_pgn_games() {
+    local pgn_path="$1"
+    python3 - "$pgn_path" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+counter = 0
+out = []
+with open(path, encoding="utf-8") as fh:
+    for line in fh:
+        if line.startswith("[Game "):
+            counter += 1
+            out.append(f'[Game "{counter}"]\n')
+        else:
+            out.append(line)
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.writelines(out)
+PY
+}
+
+run_selfplay_games() {
+    local games="$1"
+    local output_file="$2"
+    local sims="$3"
+    local model_arg="$4"
+    local mode="$5"
+    local default_threads="$6"
+
+    if [ "$SELFPLAY_SHARDS" -le 1 ]; then
+        selfplay "$games" "$output_file" "$sims" "$model_arg" "$mode" "$default_threads"
+        return
+    fi
+
+    local shard_count="$SELFPLAY_SHARDS"
+    if [ "$shard_count" -gt "$games" ]; then
+        shard_count="$games"
+    fi
+
+    local shard_threads="$SELFPLAY_SHARD_THREADS"
+    if [ "$shard_threads" -le 0 ]; then
+        shard_threads=$(( (default_threads + shard_count - 1) / shard_count ))
+    fi
+    [ "$shard_threads" -lt 1 ] && shard_threads=1
+
+    local gpus_per_shard="$SELFPLAY_GPUS_PER_SHARD"
+    if [ "$gpus_per_shard" -le 0 ]; then
+        if [ "$NUM_GPUS" -ge "$shard_count" ]; then
+            gpus_per_shard=$(( NUM_GPUS / shard_count ))
+            [ "$gpus_per_shard" -lt 1 ] && gpus_per_shard=1
+        else
+            gpus_per_shard=1
+        fi
+    fi
+
+    echo "Running sharded self-play: shards=$shard_count threads_per_shard=$shard_threads gpus_per_shard=$gpus_per_shard"
+
+    local base_games=$(( games / shard_count ))
+    local remainder=$(( games % shard_count ))
+    local -a shard_json_files=()
+    local -a shard_pgn_files=()
+    local -a shard_logs=()
+    local -a shard_pids=()
+
+    local sid
+    for ((sid = 0; sid < shard_count; sid++)); do
+        local shard_games="$base_games"
+        if [ "$sid" -lt "$remainder" ]; then
+            shard_games=$(( shard_games + 1 ))
+        fi
+        if [ "$shard_games" -le 0 ]; then
+            continue
+        fi
+
+        local shard_json="${output_file%.jsonl}.shard${sid}.jsonl"
+        local shard_pgn="${output_file%.jsonl}.shard${sid}.pgn"
+        local shard_log="${output_file%.jsonl}.shard${sid}.log"
+        rm -f "$shard_json" "$shard_pgn" "$shard_log"
+
+        local gpu_env=""
+        if [ "$NUM_GPUS" -gt 0 ] && [ "$model_arg" != "-" ]; then
+            local gpu_start=$(( (sid * gpus_per_shard) % NUM_GPUS ))
+            local gpu_list
+            gpu_list=$(gpu_list_for_shard "$gpu_start" "$gpus_per_shard" "$NUM_GPUS")
+            gpu_env="$gpu_list"
+            echo "[shard $sid] games=$shard_games threads=$shard_threads CUDA_VISIBLE_DEVICES=$gpu_list"
+            CUDA_VISIBLE_DEVICES="$gpu_env" selfplay "$shard_games" "$shard_json" "$sims" "$model_arg" "$mode" "$shard_threads" >"$shard_log" 2>&1 &
+        else
+            echo "[shard $sid] games=$shard_games threads=$shard_threads (CPU inference)"
+            selfplay "$shard_games" "$shard_json" "$sims" "$model_arg" "$mode" "$shard_threads" >"$shard_log" 2>&1 &
+        fi
+
+        shard_json_files+=("$shard_json")
+        shard_pgn_files+=("$shard_pgn")
+        shard_logs+=("$shard_log")
+        shard_pids+=("$!")
+    done
+
+    local failed=0
+    local pid
+    for pid in "${shard_pids[@]}"; do
+        if ! wait "$pid"; then
+            failed=1
+        fi
+    done
+
+    if [ "$failed" -ne 0 ]; then
+        echo "ERROR: one or more self-play shards failed"
+        local log
+        for log in "${shard_logs[@]}"; do
+            if [ -f "$log" ]; then
+                echo "--- tail: $log ---"
+                tail -40 "$log" || true
+            fi
+        done
+        exit 1
+    fi
+
+    local f
+    : > "$output_file"
+    for f in "${shard_json_files[@]}"; do
+        cat "$f" >> "$output_file"
+    done
+
+    local merged_pgn="${output_file%.jsonl}.pgn"
+    : > "$merged_pgn"
+    for f in "${shard_pgn_files[@]}"; do
+        if [ -f "$f" ]; then
+            cat "$f" >> "$merged_pgn"
+            printf '\n' >> "$merged_pgn"
+        fi
+    done
+    renumber_pgn_games "$merged_pgn"
+
+    for f in "${shard_json_files[@]}" "${shard_pgn_files[@]}" "${shard_logs[@]}"; do
+        rm -f "$f"
+    done
+}
+
 run_generation() {
     local mode="$1"
     local gen_in_phase="$2"
@@ -138,7 +298,7 @@ run_generation() {
     else
         echo "Generating $GAMES games ($mode, $SIMS sims, $THREADS threads)..."
         local sp_start=$SECONDS
-        selfplay "$GAMES" "$data_file" "$SIMS" "$model_arg" "$mode" "$THREADS"
+        run_selfplay_games "$GAMES" "$data_file" "$SIMS" "$model_arg" "$mode" "$THREADS"
         sp_elapsed=$((SECONDS - sp_start))
         local positions
         positions=$(wc -l < "$data_file")

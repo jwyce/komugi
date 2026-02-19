@@ -32,6 +32,23 @@ struct LabelRecord {
 }
 
 fn detect_gpu_count() -> usize {
+    if let Ok(visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
+        let trimmed = visible.trim();
+        if trimmed == "-1" {
+            return 0;
+        }
+        if !trimmed.is_empty() {
+            let count = trimmed
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "NoDevFiles")
+                .count();
+            if count > 0 {
+                return count;
+            }
+        }
+    }
+
     let output = std::process::Command::new("nvidia-smi").arg("-L").output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
