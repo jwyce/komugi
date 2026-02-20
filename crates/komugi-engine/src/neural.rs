@@ -220,6 +220,41 @@ impl Policy for GpuBatchPolicy {
         let value = result[POLICY_SIZE];
         (priors, Some(value))
     }
+
+    fn prior_and_value_batch(
+        &self,
+        batch: &[(&Position, &[Move])],
+    ) -> Vec<(Vec<f32>, Option<f32>)> {
+        if batch.is_empty() {
+            return Vec::new();
+        }
+        // Send all requests first (non-blocking enqueue to GPU worker).
+        // The GPU worker sees all N requests in its channel and batches
+        // them into a single inference call instead of N separate calls.
+        let mut resp_rxs = Vec::with_capacity(batch.len());
+        for (pos, _) in batch {
+            let encoding = encode_position(pos);
+            let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+            self.sender
+                .send(InferenceRequest {
+                    encoding,
+                    response_tx: resp_tx,
+                })
+                .expect("GPU inference server died");
+            resp_rxs.push(resp_rx);
+        }
+        // Collect all responses (GPU processed them as one batch).
+        batch
+            .iter()
+            .zip(resp_rxs)
+            .map(|((_, moves), resp_rx)| {
+                let result = resp_rx.recv().expect("GPU inference server died");
+                let priors = logits_to_priors(&result[..POLICY_SIZE], moves);
+                let value = result[POLICY_SIZE];
+                (priors, Some(value))
+            })
+            .collect()
+    }
 }
 
 impl Evaluator for GpuBatchPolicy {
@@ -248,10 +283,18 @@ fn gpu_inference_loop(
         };
 
         let mut batch = vec![first];
-        while batch.len() < cfg.max_batch_size {
-            match rx.try_recv() {
-                Ok(req) => batch.push(req),
-                Err(_) => break,
+        // Wait briefly for cross-thread coalescing (recv_timeout), then
+        // fast-drain remaining requests (try_recv). This lets requests from
+        // multiple threads arriving microseconds apart get batched together.
+        if batch.len() < cfg.max_batch_size {
+            if let Ok(req) = rx.recv_timeout(cfg.batch_timeout) {
+                batch.push(req);
+                while batch.len() < cfg.max_batch_size {
+                    match rx.try_recv() {
+                        Ok(req) => batch.push(req),
+                        Err(_) => break,
+                    }
+                }
             }
         }
 

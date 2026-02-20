@@ -19,6 +19,19 @@ pub trait Policy: Send + Sync {
     fn prior_and_value(&self, position: &Position, moves: &[Move]) -> (Vec<f32>, Option<f32>) {
         (self.prior(position, moves), None)
     }
+
+    /// Evaluate multiple positions in a single batch. GPU policies override
+    /// this to send all requests before collecting responses, enabling
+    /// virtual-loss batched MCTS to amortize GPU round-trip latency.
+    fn prior_and_value_batch(
+        &self,
+        batch: &[(&Position, &[Move])],
+    ) -> Vec<(Vec<f32>, Option<f32>)> {
+        batch
+            .iter()
+            .map(|(pos, moves)| self.prior_and_value(pos, moves))
+            .collect()
+    }
 }
 
 /// Uniform policy: assigns equal probability to all legal moves.

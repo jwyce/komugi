@@ -27,6 +27,7 @@ pub struct MctsConfig {
     pub dirichlet_epsilon: f32,
     pub temperature: f32,
     pub temperature_drop_move: u32,
+    pub vl_batch_size: u32,
 }
 
 impl Default for MctsConfig {
@@ -39,6 +40,7 @@ impl Default for MctsConfig {
             dirichlet_epsilon: DEFAULT_DIRICHLET_EPSILON,
             temperature: DEFAULT_TEMPERATURE,
             temperature_drop_move: DEFAULT_TEMPERATURE_DROP_MOVE,
+            vl_batch_size: 1,
         }
     }
 }
@@ -52,6 +54,7 @@ struct Node {
     mv: Option<Move>,
     visits: u32,
     total_value: f64,
+    in_flight: u32,
     prior: f32,
     is_expanded: bool,
     is_terminal: bool,
@@ -67,6 +70,7 @@ impl Node {
             mv: None,
             visits: 0,
             total_value: 0.0,
+            in_flight: 0,
             prior: 1.0,
             is_expanded: false,
             is_terminal: false,
@@ -82,6 +86,7 @@ impl Node {
             mv: Some(mv),
             visits: 0,
             total_value: 0.0,
+            in_flight: 0,
             prior,
             is_expanded: false,
             is_terminal: false,
@@ -172,8 +177,15 @@ impl MctsSearcher {
                 break;
             }
 
-            self.run_simulation(position, policy, &mut rng);
-            simulations = simulations.saturating_add(1);
+            if self.config.vl_batch_size <= 1 {
+                self.run_simulation(position, policy, &mut rng);
+                simulations = simulations.saturating_add(1);
+            } else {
+                let remaining = max_simulations - simulations;
+                let batch_n = self.config.vl_batch_size.min(remaining);
+                let completed = self.run_batched_simulations(position, policy, batch_n, &mut rng);
+                simulations = simulations.saturating_add(completed);
+            }
         }
 
         let best_move = self.select_root_move(position.move_number, &mut rng);
@@ -341,22 +353,22 @@ impl MctsSearcher {
 
     fn select_child(&self, parent_idx: usize) -> usize {
         let parent = &self.arena[parent_idx];
-        let parent_visits = f64::from(parent.visits.max(1)).sqrt();
+        let parent_eff = f64::from((parent.visits + parent.in_flight).max(1)).sqrt();
 
         let mut best_idx = parent.children[0];
         let mut best_score = f64::NEG_INFINITY;
 
         for &child_idx in &parent.children {
             let child = &self.arena[child_idx];
+            let child_eff = child.visits + child.in_flight;
 
-            // PUCT: Q(s,a) + c_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a)).
-            let q = if child.visits == 0 {
+            let q = if child_eff == 0 {
                 0.0
             } else {
-                -child.total_value / f64::from(child.visits)
+                -child.total_value / f64::from(child_eff)
             };
-            let u = f64::from(self.config.c_puct) * f64::from(child.prior) * parent_visits
-                / (1.0 + f64::from(child.visits));
+            let u = f64::from(self.config.c_puct) * f64::from(child.prior) * parent_eff
+                / (1.0 + f64::from(child_eff));
             let score = q + u;
 
             if score > best_score {
@@ -418,6 +430,194 @@ impl MctsSearcher {
 
             node_idx = parent_idx;
             value = -value;
+        }
+    }
+
+    fn run_batched_simulations(
+        &mut self,
+        root_position: &Position,
+        policy: &dyn Policy,
+        batch_size: u32,
+        rng: &mut impl Rng,
+    ) -> u32 {
+        struct PendingLeaf {
+            node_idx: usize,
+            position: Position,
+            moves: Vec<Move>,
+            path: Vec<usize>,
+            is_root: bool,
+        }
+
+        let mut pending: Vec<PendingLeaf> = Vec::with_capacity(batch_size as usize);
+        let mut completed = 0u32;
+
+        for _ in 0..batch_size {
+            let mut working = root_position.clone();
+            let mut node_idx = 0usize;
+            let mut path: Vec<usize> = Vec::new();
+
+            loop {
+                if self.arena[node_idx].is_terminal {
+                    let value = self.terminal_value(&working);
+                    self.undo_virtual_loss_path(&path);
+                    self.backpropagate(node_idx, value);
+                    completed += 1;
+                    break;
+                }
+
+                if !self.arena[node_idx].is_expanded {
+                    if self.arena[node_idx].in_flight > 0 {
+                        self.undo_virtual_loss_path(&path);
+                        break;
+                    }
+
+                    self.arena[node_idx].in_flight += 1;
+                    path.push(node_idx);
+
+                    if !working.in_draft() {
+                        if is_marshal_captured(&working) {
+                            let node = &mut self.arena[node_idx];
+                            node.is_terminal = true;
+                            node.is_expanded = true;
+                            self.undo_virtual_loss_path(&path);
+                            self.backpropagate(node_idx, -1.0);
+                            completed += 1;
+                            break;
+                        }
+                        if working.is_fourfold_repetition() || working.is_insufficient_material() {
+                            let node = &mut self.arena[node_idx];
+                            node.is_terminal = true;
+                            node.is_expanded = true;
+                            self.undo_virtual_loss_path(&path);
+                            self.backpropagate(node_idx, 0.0);
+                            completed += 1;
+                            break;
+                        }
+                    }
+
+                    let moves: Vec<Move> = working.moves().into_iter().collect();
+                    if moves.is_empty() {
+                        let value = if working.in_check(None) { -1.0 } else { 0.0 };
+                        let node = &mut self.arena[node_idx];
+                        node.is_terminal = true;
+                        node.is_expanded = true;
+                        self.undo_virtual_loss_path(&path);
+                        self.backpropagate(node_idx, value);
+                        completed += 1;
+                        break;
+                    }
+
+                    pending.push(PendingLeaf {
+                        node_idx,
+                        position: working,
+                        moves,
+                        path,
+                        is_root: node_idx == 0,
+                    });
+                    break;
+                }
+
+                self.arena[node_idx].in_flight += 1;
+                path.push(node_idx);
+
+                self.progressive_widen(node_idx);
+                if self.arena[node_idx].children.is_empty() {
+                    self.undo_virtual_loss_path(&path);
+                    break;
+                }
+
+                let child_idx = self.select_child(node_idx);
+                let mv = self.arena[child_idx]
+                    .mv
+                    .as_ref()
+                    .expect("child node must contain a move");
+                working
+                    .make_move(mv)
+                    .expect("tree child move must stay legal");
+                node_idx = child_idx;
+            }
+        }
+
+        if pending.is_empty() {
+            return completed;
+        }
+
+        let batch_items: Vec<(&Position, &[Move])> = pending
+            .iter()
+            .map(|leaf| (&leaf.position, leaf.moves.as_slice()))
+            .collect();
+        let results = policy.prior_and_value_batch(&batch_items);
+
+        for (leaf, (raw_priors, neural_value)) in pending.into_iter().zip(results) {
+            self.undo_virtual_loss_path(&leaf.path);
+            let value = self.expand_with_result(
+                leaf.node_idx,
+                &leaf.position,
+                leaf.moves,
+                raw_priors,
+                neural_value,
+                leaf.is_root,
+                rng,
+            );
+            self.backpropagate(leaf.node_idx, value);
+            completed += 1;
+        }
+
+        completed
+    }
+
+    fn expand_with_result(
+        &mut self,
+        node_idx: usize,
+        position: &Position,
+        moves: Vec<Move>,
+        raw_priors: Vec<f32>,
+        neural_value: Option<f32>,
+        apply_root_noise: bool,
+        rng: &mut impl Rng,
+    ) -> f64 {
+        let mut priors = self.sanitize_priors(raw_priors, moves.len());
+        if apply_root_noise {
+            let alpha = self.config.dirichlet_concentration / moves.len() as f32;
+            self.add_dirichlet_noise(&mut priors, alpha, rng);
+        }
+
+        let mut move_priors: Vec<(Move, f32)> = moves.into_iter().zip(priors).collect();
+        move_priors.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let initial_count = self.initial_width().min(move_priors.len());
+        let initial_moves = move_priors[..initial_count].to_vec();
+        let mut children = Vec::with_capacity(initial_count);
+
+        for (mv, prior) in initial_moves {
+            let child_idx = self.arena.len();
+            self.arena.push(Node::child(node_idx, mv, prior));
+            children.push(child_idx);
+        }
+
+        let node = &mut self.arena[node_idx];
+        node.children = children;
+        node.all_moves = move_priors;
+        node.active_children_count = initial_count;
+        node.is_expanded = true;
+        node.is_terminal = false;
+
+        neural_value.map_or_else(
+            || self.evaluate_value(position),
+            |v| {
+                let fv = f64::from(v);
+                if fv.is_finite() {
+                    fv.clamp(-1.0, 1.0)
+                } else {
+                    self.evaluate_value(position)
+                }
+            },
+        )
+    }
+
+    fn undo_virtual_loss_path(&mut self, path: &[usize]) {
+        for &idx in path {
+            self.arena[idx].in_flight = self.arena[idx].in_flight.saturating_sub(1);
         }
     }
 

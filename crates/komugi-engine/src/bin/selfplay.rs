@@ -122,8 +122,13 @@ fn main() {
             .unwrap_or(4)
     });
 
+    let vl_batch: u32 = std::env::var("KOMUGI_VL_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     let mcts_config = MctsConfig {
         max_simulations: simulations,
+        vl_batch_size: vl_batch,
         ..Default::default()
     };
 
