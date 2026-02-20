@@ -77,7 +77,7 @@ const TOWER_HEIGHT_BONUS: [i32; 4] = [0, 0, 15, 35];
 /// Bonus per friendly piece adjacent to marshal.
 const MARSHAL_SHIELD_BONUS: i32 = 10;
 
-const HAND_MULTIPLIER_DRAFT_MILLI: i32 = 1000;
+const HAND_MULTIPLIER_DRAFT_MILLI: i32 = 950;
 const HAND_MULTIPLIER_POST_BASE_MILLI: i32 = 1200;
 const HAND_MULTIPLIER_POST_MAX_MILLI: i32 = 1400;
 const LOW_HAND_RAMP_START: i32 = 6;
