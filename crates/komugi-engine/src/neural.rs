@@ -248,16 +248,10 @@ fn gpu_inference_loop(
         };
 
         let mut batch = vec![first];
-        let deadline = Instant::now() + cfg.batch_timeout;
         while batch.len() < cfg.max_batch_size {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match rx.recv_timeout(remaining) {
+            match rx.try_recv() {
                 Ok(req) => batch.push(req),
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(_) => break,
             }
         }
 

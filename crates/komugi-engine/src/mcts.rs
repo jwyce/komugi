@@ -265,16 +265,29 @@ impl MctsSearcher {
         apply_root_noise: bool,
         rng: &mut impl Rng,
     ) -> f64 {
-        if self.is_terminal_position(position) {
-            let node = &mut self.arena[node_idx];
-            node.is_terminal = true;
-            node.is_expanded = true;
-            node.children.clear();
-            node.all_moves.clear();
-            node.active_children_count = 0;
-            return self.terminal_value(position);
+        // Quick terminal checks that don't require move generation.
+        if !position.in_draft() {
+            if is_marshal_captured(position) {
+                let node = &mut self.arena[node_idx];
+                node.is_terminal = true;
+                node.is_expanded = true;
+                node.children.clear();
+                node.all_moves.clear();
+                node.active_children_count = 0;
+                return -1.0;
+            }
+            if position.is_fourfold_repetition() || position.is_insufficient_material() {
+                let node = &mut self.arena[node_idx];
+                node.is_terminal = true;
+                node.is_expanded = true;
+                node.children.clear();
+                node.all_moves.clear();
+                node.active_children_count = 0;
+                return 0.0;
+            }
         }
 
+        // Generate moves ONCE — used for both terminal detection and expansion.
         let moves = position.moves().into_iter().collect::<Vec<_>>();
         if moves.is_empty() {
             let node = &mut self.arena[node_idx];
@@ -510,13 +523,6 @@ impl MctsSearcher {
             Color::White => white_value,
             Color::Black => -white_value,
         }
-    }
-
-    fn is_terminal_position(&self, position: &Position) -> bool {
-        if position.in_draft() {
-            return false;
-        }
-        is_marshal_captured(position) || position.is_checkmate() || position.is_draw()
     }
 
     fn terminal_value(&self, position: &Position) -> f64 {
