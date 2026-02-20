@@ -181,11 +181,14 @@ pub fn generate_all_legal_moves(board: &Board, turn: Color) -> MoveList {
 pub fn generate_all_legal_moves_in_state(state: &ParsedFen) -> MoveList {
     let mut board = state.board.clone();
     let marshal_square = find_marshal_square(&board, state.turn);
-    let mut moves =
-        generate_all_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand), true);
-    if state.drafting[state.turn as usize] {
-        moves.clear();
-    }
+    let drafting = state.drafting[state.turn as usize];
+
+    let mut moves = if drafting {
+        MoveList::new()
+    } else {
+        generate_all_moves_with_mode(&mut board, state.turn, state.mode, Some(&state.hand), true)
+    };
+
     for hand_piece in state
         .hand
         .iter()
@@ -198,7 +201,7 @@ pub fn generate_all_legal_moves_in_state(state: &ParsedFen) -> MoveList {
             mode: state.mode,
             drafting_rights: state.drafting,
             marshal_square,
-            enforce_legality: true,
+            enforce_legality: !drafting,
         };
         append_arata_moves(&mut moves, &mut board, &ctx, hand_piece);
     }
@@ -235,16 +238,20 @@ pub fn generate_all_pseudo_legal_moves_in_state(state: &ParsedFen) -> MoveList {
 pub fn generate_all_legal_moves_from_position(position: &Position) -> MoveList {
     let mut board = position.board.clone();
     let marshal_square = position.marshal_squares[position.turn as usize];
-    let mut moves = generate_all_moves_with_mode(
-        &mut board,
-        position.turn,
-        position.mode,
-        Some(&position.hand),
-        true,
-    );
-    if position.drafting_rights[position.turn as usize] {
-        moves.clear();
-    }
+    let drafting = position.drafting_rights[position.turn as usize];
+
+    let mut moves = if drafting {
+        MoveList::new()
+    } else {
+        generate_all_moves_with_mode(
+            &mut board,
+            position.turn,
+            position.mode,
+            Some(&position.hand),
+            true,
+        )
+    };
+
     for hand_piece in position
         .hand
         .iter()
@@ -257,7 +264,7 @@ pub fn generate_all_legal_moves_from_position(position: &Position) -> MoveList {
             mode: position.mode,
             drafting_rights: position.drafting_rights,
             marshal_square,
-            enforce_legality: true,
+            enforce_legality: !drafting,
         };
         append_arata_moves(&mut moves, &mut board, &ctx, hand_piece);
     }

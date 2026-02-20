@@ -94,3 +94,105 @@ fn count_pieces(position: &Position, color: Color) -> usize {
     }
     pieces
 }
+
+#[test]
+fn vl_batch_mcts_returns_move_in_draft_game396() {
+    use komugi_core::{MoveType, PieceType, Square};
+
+    let mut position = Position::new(SetupMode::Intermediate);
+    assert!(position.in_draft());
+
+    let moves = position.moves();
+    let mv1 = moves
+        .iter()
+        .find(|mv| {
+            mv.piece == PieceType::Marshal
+                && mv.to.square == Square::new_unchecked(7, 2)
+                && mv.move_type == MoveType::Arata
+                && !mv.draft_finished
+        })
+        .expect("White should be able to drop marshal at (7,2)");
+    position.make_move(mv1).unwrap();
+
+    let moves = position.moves();
+    let mv2 = moves
+        .iter()
+        .find(|mv| {
+            mv.piece == PieceType::Marshal
+                && mv.to.square == Square::new_unchecked(3, 2)
+                && mv.move_type == MoveType::Arata
+                && !mv.draft_finished
+        })
+        .expect("Black should be able to drop marshal at (3,2)");
+    position.make_move(mv2).unwrap();
+
+    let moves = position.moves();
+    let mv3 = moves
+        .iter()
+        .find(|mv| {
+            mv.piece == PieceType::LieutenantGeneral
+                && mv.to.square == Square::new_unchecked(7, 6)
+                && mv.move_type == MoveType::Arata
+                && !mv.draft_finished
+        })
+        .expect("White should be able to drop lieutenant at (7,6)");
+    position.make_move(mv3).unwrap();
+
+    assert!(position.in_draft());
+    assert_eq!(position.turn, Color::Black);
+    let legal_moves = position.moves();
+    assert!(
+        legal_moves.len() > 100,
+        "Expected many legal moves, got {}",
+        legal_moves.len(),
+    );
+
+    let mut searcher = MctsSearcher::new(MctsConfig {
+        max_simulations: 400,
+        vl_batch_size: 8,
+        ..MctsConfig::default()
+    });
+
+    let result = searcher.search_with_policy(&position, SearchLimits::default(), &HeuristicPolicy);
+
+    assert!(
+        result.best_move.is_some(),
+        "VL-batched MCTS must return a move for draft position with {} legal moves (nodes_searched: {})",
+        legal_moves.len(),
+        result.nodes_searched,
+    );
+    assert!(
+        result.nodes_searched >= 100,
+        "Should complete many simulations"
+    );
+}
+
+#[test]
+fn vl_batch_selfplay_intermediate_no_draft_draws() {
+    for game_idx in 0..3 {
+        let config = SelfPlayConfig {
+            mcts_config: MctsConfig {
+                max_simulations: 50,
+                vl_batch_size: 8,
+                ..MctsConfig::default()
+            },
+            setup_mode: SetupMode::Intermediate,
+            max_moves: 20,
+            policy: std::sync::Arc::new(HeuristicPolicy),
+        };
+
+        let game = play_game(&config);
+
+        if game.total_moves < 20 {
+            if let Some(last) = game.positions.last() {
+                let pos = Position::from_fen(&last.fen).unwrap();
+                assert!(
+                    !pos.in_draft() || pos.is_game_over(),
+                    "Game {game_idx}: ended at ply {} during draft phase! FEN: {}",
+                    game.total_moves,
+                    last.fen,
+                );
+            }
+        }
+    }
+}

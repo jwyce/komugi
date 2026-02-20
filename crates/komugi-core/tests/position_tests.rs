@@ -232,6 +232,61 @@ fn draft_done_side_does_not_get_setup_turns_until_both_done() {
 }
 
 #[test]
+fn asymmetric_draft_game208_reproduction() {
+    // Reproduce Game 208 from intermediate gen0:
+    // 1. 新帥(8-3-1) 新帥(3-5-1) 2. 新大(9-5-1)終 1/2-1/2
+    // After White ends draft at ply 3, Black should have hundreds of legal moves.
+    let mut gungi = Gungi::new(SetupMode::Intermediate);
+
+    // Ply 1: White drops Marshal at (8,3,1)
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let w1 = parse_san("新帥(8-3-1)", &parsed).unwrap();
+    gungi.make_move(&w1).unwrap();
+    assert_eq!(gungi.turn(), Color::Black);
+
+    // Ply 2: Black drops Marshal at (3,5,1)
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let b1 = parse_san("新帥(3-5-1)", &parsed).unwrap();
+    gungi.make_move(&b1).unwrap();
+    assert_eq!(gungi.turn(), Color::White);
+
+    // Ply 3: White drops LieutenantGeneral at (9,5,1) AND ends draft
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let w2 = parse_san("新大(9-5-1)終", &parsed).unwrap();
+    gungi.make_move(&w2).unwrap();
+
+    // After White ends draft: Black's turn, Black still drafting
+    assert_eq!(gungi.turn(), Color::Black);
+    assert_eq!(gungi.position().drafting_rights, [false, true]);
+    assert!(gungi.position().in_draft());
+    assert!(!gungi.position().is_game_over());
+
+    // BLACK MUST HAVE LEGAL MOVES - this is the bug check
+    let moves = gungi.moves();
+    assert!(
+        !moves.is_empty(),
+        "Black should have legal draft moves after White ends draft, got 0 moves. \
+         FEN: {}",
+        gungi.fen()
+    );
+
+    // Verify they're all Black's Arata moves
+    assert!(moves.iter().all(|mv| mv.color == Color::Black));
+    assert!(moves.iter().all(|mv| mv.move_type == MoveType::Arata));
+
+    // Should have both draft-ending and non-draft-ending variants
+    let has_end = moves.iter().any(|mv| mv.draft_finished);
+    let has_continue = moves.iter().any(|mv| !mv.draft_finished);
+    assert!(has_end, "Should have draft-ending moves");
+    assert!(has_continue, "Should have non-draft-ending moves");
+
+    eprintln!(
+        "Game 208 reproduction: {} legal moves for Black after White ends draft",
+        moves.len()
+    );
+}
+
+#[test]
 fn post_draft_arata_is_limited_by_frontmost_piece_rank() {
     let gungi = Gungi::from_fen("4m4/9/9/9/9/4M4/9/9/9 D1/- w 3 - 1").unwrap();
     let moves = gungi.moves();
