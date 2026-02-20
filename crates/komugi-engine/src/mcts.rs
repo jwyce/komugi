@@ -315,7 +315,14 @@ impl MctsSearcher {
 
         neural_value.map_or_else(
             || self.evaluate_value(position),
-            |v| f64::from(v).clamp(-1.0, 1.0),
+            |v| {
+                let fv = f64::from(v);
+                if fv.is_finite() {
+                    fv.clamp(-1.0, 1.0)
+                } else {
+                    self.evaluate_value(position)
+                }
+            },
         )
     }
 

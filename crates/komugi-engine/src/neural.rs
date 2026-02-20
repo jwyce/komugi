@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::env;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -185,16 +185,14 @@ struct InferenceRequest {
 }
 
 pub struct GpuBatchPolicy {
-    senders: Arc<Vec<mpsc::SyncSender<InferenceRequest>>>,
-    counter: Arc<AtomicUsize>,
+    sender: mpsc::SyncSender<InferenceRequest>,
 }
 
 impl GpuBatchPolicy {
     fn submit(&self, position: &Position) -> Vec<f32> {
         let encoding = encode_position(position);
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.senders.len();
-        self.senders[idx]
+        self.sender
             .send(InferenceRequest {
                 encoding,
                 response_tx: resp_tx,
@@ -297,8 +295,8 @@ fn gpu_inference_loop(
 }
 
 pub struct GpuInferencePool {
-    senders: Arc<Vec<mpsc::SyncSender<InferenceRequest>>>,
-    counter: Arc<AtomicUsize>,
+    senders: Vec<mpsc::SyncSender<InferenceRequest>>,
+    counter: AtomicUsize,
 }
 
 impl GpuInferencePool {
@@ -335,15 +333,15 @@ impl GpuInferencePool {
             senders.len()
         );
         Ok(Self {
-            senders: Arc::new(senders),
-            counter: Arc::new(AtomicUsize::new(0)),
+            senders,
+            counter: AtomicUsize::new(0),
         })
     }
 
     pub fn policy(&self) -> GpuBatchPolicy {
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.senders.len();
         GpuBatchPolicy {
-            senders: Arc::clone(&self.senders),
-            counter: Arc::clone(&self.counter),
+            sender: self.senders[idx].clone(),
         }
     }
 
