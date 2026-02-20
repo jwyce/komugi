@@ -286,7 +286,8 @@ impl MctsSearcher {
             return if position.in_check(None) { -1.0 } else { 0.0 };
         }
 
-        let mut priors = self.priors_for_moves(policy, position, &moves);
+        let (raw_priors, neural_value) = policy.prior_and_value(position, &moves);
+        let mut priors = self.sanitize_priors(raw_priors, moves.len());
         if apply_root_noise {
             let alpha = self.config.dirichlet_concentration / moves.len() as f32;
             self.add_dirichlet_noise(&mut priors, alpha, rng);
@@ -312,7 +313,10 @@ impl MctsSearcher {
         node.is_expanded = true;
         node.is_terminal = false;
 
-        self.evaluate_value(position)
+        neural_value.map_or_else(
+            || self.evaluate_value(position),
+            |v| f64::from(v).clamp(-1.0, 1.0),
+        )
     }
 
     fn select_child(&self, parent_idx: usize) -> usize {
@@ -397,19 +401,13 @@ impl MctsSearcher {
         }
     }
 
-    fn priors_for_moves(
-        &self,
-        policy: &dyn Policy,
-        position: &Position,
-        moves: &[Move],
-    ) -> Vec<f32> {
-        if moves.is_empty() {
+    fn sanitize_priors(&self, mut priors: Vec<f32>, num_moves: usize) -> Vec<f32> {
+        if num_moves == 0 {
             return Vec::new();
         }
 
-        let mut priors = policy.prior(position, moves);
-        if priors.len() != moves.len() {
-            return vec![1.0 / moves.len() as f32; moves.len()];
+        if priors.len() != num_moves {
+            return vec![1.0 / num_moves as f32; num_moves];
         }
 
         let mut sum = 0.0f32;
@@ -421,7 +419,7 @@ impl MctsSearcher {
         }
 
         if sum <= f32::EPSILON {
-            return vec![1.0 / moves.len() as f32; moves.len()];
+            return vec![1.0 / num_moves as f32; num_moves];
         }
 
         for prior in &mut priors {

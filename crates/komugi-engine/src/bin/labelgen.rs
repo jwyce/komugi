@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     #[cfg(feature = "neural")]
                     {
                         if let Some(ref pool) = gpu_pool {
-                            Arc::new(pool.policy(thread_id))
+                            Arc::new(pool.policy())
                         } else if let Some(ref path) = model_path {
                             Arc::new(
                                 NeuralPolicy::from_file(path)
@@ -282,7 +282,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 #[cfg(feature = "neural")]
                 {
                     if let Some(ref pool) = gpu_pool {
-                        Arc::new(pool.policy(thread_id + num_threads))
+                        Arc::new(pool.policy())
                     } else if let Some(ref path) = model_path {
                         Arc::new(
                             NeuralPolicy::from_file(path)

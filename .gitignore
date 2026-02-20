@@ -6,6 +6,7 @@
 
 # Trained models (downloaded from cloud)
 /models/
+/checkpoints/
 
 # Python
 __pycache__/

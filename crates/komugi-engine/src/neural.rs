@@ -1,7 +1,8 @@
 use std::cell::UnsafeCell;
 use std::env;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -107,6 +108,14 @@ impl Policy for NeuralPolicy {
         let (logits, _value) = self.run_inference(position);
         logits_to_priors(&logits, moves)
     }
+
+    fn prior_and_value(&self, position: &Position, moves: &[Move]) -> (Vec<f32>, Option<f32>) {
+        if moves.is_empty() {
+            return (Vec::new(), None);
+        }
+        let (logits, value) = self.run_inference(position);
+        (logits_to_priors(&logits, moves), Some(value))
+    }
 }
 
 impl Evaluator for NeuralPolicy {
@@ -176,14 +185,16 @@ struct InferenceRequest {
 }
 
 pub struct GpuBatchPolicy {
-    request_tx: mpsc::SyncSender<InferenceRequest>,
+    senders: Arc<Vec<mpsc::SyncSender<InferenceRequest>>>,
+    counter: Arc<AtomicUsize>,
 }
 
 impl GpuBatchPolicy {
     fn submit(&self, position: &Position) -> Vec<f32> {
         let encoding = encode_position(position);
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
-        self.request_tx
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.senders.len();
+        self.senders[idx]
             .send(InferenceRequest {
                 encoding,
                 response_tx: resp_tx,
@@ -200,6 +211,16 @@ impl Policy for GpuBatchPolicy {
         }
         let logits = self.submit(position);
         logits_to_priors(&logits[..POLICY_SIZE], moves)
+    }
+
+    fn prior_and_value(&self, position: &Position, moves: &[Move]) -> (Vec<f32>, Option<f32>) {
+        if moves.is_empty() {
+            return (Vec::new(), None);
+        }
+        let result = self.submit(position);
+        let priors = logits_to_priors(&result[..POLICY_SIZE], moves);
+        let value = result[POLICY_SIZE];
+        (priors, Some(value))
     }
 }
 
@@ -276,7 +297,8 @@ fn gpu_inference_loop(
 }
 
 pub struct GpuInferencePool {
-    senders: Vec<mpsc::SyncSender<InferenceRequest>>,
+    senders: Arc<Vec<mpsc::SyncSender<InferenceRequest>>>,
+    counter: Arc<AtomicUsize>,
 }
 
 impl GpuInferencePool {
@@ -312,12 +334,16 @@ impl GpuInferencePool {
             cfg.queue_capacity,
             senders.len()
         );
-        Ok(Self { senders })
+        Ok(Self {
+            senders: Arc::new(senders),
+            counter: Arc::new(AtomicUsize::new(0)),
+        })
     }
 
-    pub fn policy(&self, gpu_idx: usize) -> GpuBatchPolicy {
+    pub fn policy(&self) -> GpuBatchPolicy {
         GpuBatchPolicy {
-            request_tx: self.senders[gpu_idx % self.senders.len()].clone(),
+            senders: Arc::clone(&self.senders),
+            counter: Arc::clone(&self.counter),
         }
     }
 

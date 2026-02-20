@@ -11,6 +11,14 @@ pub trait Policy: Send + Sync {
     /// Returns a prior probability for each move in the given list.
     /// Output must be the same length as `moves` and sum to ~1.0.
     fn prior(&self, position: &Position, moves: &[Move]) -> Vec<f32>;
+
+    /// Returns prior probabilities and optionally a value estimate from the
+    /// same inference call. Neural policies return `Some(value)` (in
+    /// side-to-move perspective, range `[-1, 1]`) to avoid a separate
+    /// classical evaluation; heuristic policies return `None`.
+    fn prior_and_value(&self, position: &Position, moves: &[Move]) -> (Vec<f32>, Option<f32>) {
+        (self.prior(position, moves), None)
+    }
 }
 
 /// Uniform policy: assigns equal probability to all legal moves.
