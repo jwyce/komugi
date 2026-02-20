@@ -148,7 +148,12 @@ run_selfplay_games() {
     local default_threads="$6"
 
     if [ "$SELFPLAY_SHARDS" -le 1 ]; then
-        selfplay "$games" "$output_file" "$sims" "$model_arg" "$mode" "$default_threads"
+        if [ "${KOMUGI_CPU_INFERENCE:-0}" = "1" ]; then
+            echo "CPU inference mode (KOMUGI_CPU_INFERENCE=1)"
+            CUDA_VISIBLE_DEVICES=-1 selfplay "$games" "$output_file" "$sims" "$model_arg" "$mode" "$default_threads"
+        else
+            selfplay "$games" "$output_file" "$sims" "$model_arg" "$mode" "$default_threads"
+        fi
         return
     fi
 
