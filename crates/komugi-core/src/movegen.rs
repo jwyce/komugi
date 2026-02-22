@@ -540,6 +540,21 @@ fn append_arata_moves(
     let is_last_piece = player_hand_count == 1;
     let color_drafting = ctx.drafting_rights[usize::from(hand_piece.color as u8)];
 
+    // Minimum 8 pieces on board (after this drop) before 終 is legal.
+    // Count current pieces; if current + 1 >= 8 (i.e. current >= 7), allow draft_finished.
+    const MIN_DRAFT_PIECES: u32 = 8;
+    let can_end_draft = if color_drafting {
+        let pieces_on_board: u32 = SQUARES
+            .iter()
+            .filter_map(|&sq| board.get(sq))
+            .flat_map(Tower::iter)
+            .filter(|p| p.color == hand_piece.color)
+            .count() as u32;
+        pieces_on_board + 1 >= MIN_DRAFT_PIECES
+    } else {
+        false
+    };
+
     for rank in ranks.iter().copied() {
         for file in 1..=9 {
             let target = Square::new_unchecked(rank, file);
@@ -571,18 +586,20 @@ fn append_arata_moves(
                     }
                 }
 
-                let mut mv = Move::new(
-                    hand_piece.color,
-                    hand_piece.piece_type,
-                    None,
-                    TieredSquare::new_unchecked(target, next_tier),
-                    MoveType::Arata,
-                );
-                mv.draft_finished = true;
-                if !ctx.enforce_legality
-                    || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
-                {
-                    let _ = all.try_push(mv);
+                if can_end_draft || is_last_piece {
+                    let mut mv = Move::new(
+                        hand_piece.color,
+                        hand_piece.piece_type,
+                        None,
+                        TieredSquare::new_unchecked(target, next_tier),
+                        MoveType::Arata,
+                    );
+                    mv.draft_finished = true;
+                    if !ctx.enforce_legality
+                        || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
+                    {
+                        let _ = all.try_push(mv);
+                    }
                 }
             } else {
                 let mv = Move::new(

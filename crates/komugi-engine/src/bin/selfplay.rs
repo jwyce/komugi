@@ -126,6 +126,10 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    let max_moves: u32 = std::env::var("KOMUGI_MAX_MOVES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
     let mcts_config = MctsConfig {
         max_simulations: simulations,
         vl_batch_size: vl_batch,
@@ -203,7 +207,7 @@ fn main() {
                     let config = SelfPlayConfig {
                         mcts_config,
                         setup_mode: mode,
-                        max_moves: 300,
+                        max_moves,
                         policy: Arc::clone(&policy),
                     };
 

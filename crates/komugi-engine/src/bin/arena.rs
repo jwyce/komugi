@@ -86,6 +86,7 @@ fn play_game(
     mcts_sims: u32,
     ab_depth: u8,
     mcts_is_white: bool,
+    max_moves: u32,
 ) -> (u32, MatchResult) {
     let mut position = Position::new(mode);
     let mut mcts = MctsSearcher::new(MctsConfig {
@@ -115,7 +116,7 @@ fn play_game(
     };
 
     let mut moves_played = 0u32;
-    while !position.is_game_over() && position.move_number <= 300 {
+    while !position.is_game_over() && position.move_number <= max_moves {
         let result = if position.turn == mcts_color {
             mcts.search(&position, mcts_limits)
         } else {
@@ -130,7 +131,7 @@ fn play_game(
         moves_played = moves_played.saturating_add(1);
     }
 
-    let reached_move_limit = position.move_number > 300 && !position.is_game_over();
+    let reached_move_limit = position.move_number > max_moves && !position.is_game_over();
     let outcome = infer_result(&position, mcts_color, reached_move_limit);
     (moves_played, outcome)
 }
@@ -163,6 +164,10 @@ fn main() {
             .map(|n| n.get())
             .unwrap_or(4)
     });
+    let max_moves: u32 = std::env::var("KOMUGI_MAX_MOVES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
 
     let completed = Arc::new(Mutex::new(0u32));
     let results: Arc<Mutex<Vec<(u32, bool, u32, MatchResult)>>> =
@@ -188,7 +193,8 @@ fn main() {
                 };
 
                 let mcts_is_white = game_num % 2 == 1;
-                let (moves, result) = play_game(mode, mcts_sims, ab_depth, mcts_is_white);
+                let (moves, result) =
+                    play_game(mode, mcts_sims, ab_depth, mcts_is_white, max_moves);
 
                 eprintln!(
                     "[t{thread_id}] Game {game_num}/{num_games}: {moves} moves, {} (MCTS={})",

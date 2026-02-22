@@ -100,6 +100,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .unwrap_or(4)
     });
 
+    let max_moves: u32 = std::env::var("KOMUGI_MAX_MOVES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
     let play_config = MctsConfig {
         max_simulations: play_sims,
         ..Default::default()
@@ -202,7 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let config = SelfPlayConfig {
                         mcts_config: play_config,
                         setup_mode: mode,
-                        max_moves: 300,
+                        max_moves,
                         policy: Arc::clone(&policy),
                     };
 
