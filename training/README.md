@@ -58,3 +58,21 @@ python training/export_nnue.py --checkpoint checkpoints_nnue/nnue_final.pt --out
 ```
 
 The exported .nnue file (~3.5MB) can be embedded in WASM for client-side inference.
+
+## Puzzle Dataset Seeding
+
+Generate an initial puzzle candidate set from self-play JSONL:
+
+```bash
+python training/generate_puzzles.py \
+  --input /workspace/data/*.jsonl \
+  --output /workspace/data/puzzles_seed_50k.jsonl \
+  --limit 50000
+```
+
+Useful filters:
+
+- `--min-gap 0.15` for stricter tactic selection
+- `--min-move-number 10` to skip opening noise
+- `--no-drop` or `--no-capture` to bias puzzle types
+- `--allow-other` to include non-capture/non-drop tactical moves
