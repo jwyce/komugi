@@ -4,6 +4,7 @@ import argparse
 import glob
 import heapq
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,14 @@ def candidate_score(gap: float, top1: float, move_type: str, move_number: int) -
     return score
 
 
+def infer_mode_from_source(file_path: str) -> str:
+    name = Path(file_path).name
+    match = re.match(r"^(\w+)_gen\d+\.jsonl$", name)
+    if match:
+        return match.group(1)
+    return "unknown"
+
+
 def main() -> int:
     args = parse_args()
     files = expand_inputs(args.input)
@@ -200,6 +209,7 @@ def main() -> int:
                     "difficulty": difficulty_from_gap(gap),
                     "outcome": outcome,
                     "move_number": move_number,
+                    "mode": infer_mode_from_source(file_path),
                     "source": Path(file_path).name,
                 }
                 cand = Candidate(score=score, fen=fen, record=puzzle)
