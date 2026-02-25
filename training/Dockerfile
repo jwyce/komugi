@@ -27,8 +27,11 @@ RUN mkdir -p crates/komugi-wasm/src && \
     printf '' > crates/komugi-wasm/src/lib.rs && \
     printf '[package]\nname = "komugi-wasm"\nversion = "0.1.0"\nedition = "2021"\n' > crates/komugi-wasm/Cargo.toml
 
-RUN cargo build --release --bin selfplay --features neural -p komugi-engine
-RUN mkdir -p /out && install -m 0755 target/release/selfplay /out/selfplay
+RUN cargo build --release --features neural -p komugi-engine --bin selfplay --bin labelgen --bin arena
+RUN mkdir -p /out && \
+    install -m 0755 target/release/selfplay /out/selfplay && \
+    install -m 0755 target/release/labelgen /out/labelgen && \
+    install -m 0755 target/release/arena /out/arena
 
 # ── Runtime ──
 FROM --platform=linux/amd64 ${BASE_IMAGE} AS runtime
@@ -54,13 +57,12 @@ print(pathlib.Path(onnxruntime.__file__).resolve().parent/'capi')")" && \
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
     PYTHONUNBUFFERED=1
 
-COPY training/model.py .
-COPY training/train.py .
-COPY training/export_onnx.py .
-COPY training/preprocess.py .
+COPY training/*.py .
 COPY training/full_loop.sh .
 RUN chmod +x full_loop.sh
 
 COPY --from=rust-builder /out/selfplay /usr/local/bin/selfplay
+COPY --from=rust-builder /out/labelgen /usr/local/bin/labelgen
+COPY --from=rust-builder /out/arena /usr/local/bin/arena
 
 CMD ["/bin/bash"]
