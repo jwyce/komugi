@@ -761,6 +761,15 @@ fn get_available_squares(
                 let _ = piece;
                 break;
             }
+
+            let moving_forward = if origin_piece.color == Color::White {
+                dy < 0
+            } else {
+                dy > 0
+            };
+            if !moving_forward {
+                break;
+            }
         }
 
         forward_rank += dy;

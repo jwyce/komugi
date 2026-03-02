@@ -151,6 +151,45 @@ fn archer_diagonal_probe_blocked_by_taller_wing_stack() {
 }
 
 #[test]
+fn leap_pieces_cannot_jump_over_side_or_back_blockers() {
+    let archer_fen =
+        "4f1|d:s|2/j1asnm2j/dr2|w:d|1i1|d:f|/1WA1D1|g:a|2/5G3/D1Jn2n1|I:r|/1S2D|W:J|MR|D:F|/1|S:N|4AR1/2F1N4 -/- b 1 - 48";
+    let archer_state = parse_fen(archer_fen).expect("parse archer leap fixture");
+    let archer_sans: Vec<String> = generate_all_legal_moves_in_state(&archer_state)
+        .iter()
+        .map(move_to_san)
+        .collect();
+    assert!(
+        !archer_sans.iter().any(|san| san == "弓(4-3-2)(2-3-1)"),
+        "archer must not leap over backward blocker"
+    );
+
+    let cannon_fen =
+        "|n:t|an|r:d:c|d1|f:d:s|f|w:g|/5m|k:n||r:d|1/w2j3C1/1|I:J|3|j:N|1ag/1T2s|W:D:S|3/2S3R2/3ANi2|J:D|/2|F:D|2M1D1/|A:F|G2K1N2 -/- b 3 - 48";
+    let cannon_state = parse_fen(cannon_fen).expect("parse cannon leap fixture");
+    let cannon_sans: Vec<String> = generate_all_legal_moves_in_state(&cannon_state)
+        .iter()
+        .map(move_to_san)
+        .collect();
+    assert!(
+        !cannon_sans.iter().any(|san| san == "砲(1-6-3)(1-4-1)"),
+        "cannon must not leap over side blocker"
+    );
+
+    let musketeer_fen =
+        "2w2|r:K||n:k:d||r:f:c|j/5dt2/djiJ1N2s/|s:A|8/3RD4/1g1T1n1m1/DNS3M1N/G1WS5/1F|A:D|1R1F2 -/- b 3 - 81";
+    let musketeer_state = parse_fen(musketeer_fen).expect("parse musketeer leap fixture");
+    let musketeer_sans: Vec<String> = generate_all_legal_moves_in_state(&musketeer_state)
+        .iter()
+        .map(move_to_san)
+        .collect();
+    assert!(
+        !musketeer_sans.iter().any(|san| san == "筒(1-4-2)(3-2-1)"),
+        "musketeer must not leap over non-forward blocker"
+    );
+}
+
+#[test]
 fn perft_matches_baselines_for_depth_1_2() {
     let fixture_path = format!(
         "{}/tests/fixtures/perft_baselines.json",
