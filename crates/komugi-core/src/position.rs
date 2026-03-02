@@ -246,9 +246,15 @@ impl Position {
                     old_count,
                     new_count,
                 );
-                if mv.draft_finished && self.drafting_rights[color_idx(mv.color)] {
-                    zobrist_keys().xor_drafting(&mut self.zobrist_hash, mv.color);
-                    self.drafting_rights[color_idx(mv.color)] = false;
+                if mv.draft_finished {
+                    if self.drafting_rights[color_idx(mv.color)] {
+                        zobrist_keys().xor_drafting(&mut self.zobrist_hash, mv.color);
+                        self.drafting_rights[color_idx(mv.color)] = false;
+                    }
+                    if mv.color == Color::Black && self.drafting_rights[color_idx(Color::White)] {
+                        zobrist_keys().xor_drafting(&mut self.zobrist_hash, Color::White);
+                        self.drafting_rights[color_idx(Color::White)] = false;
+                    }
                 }
             }
         }

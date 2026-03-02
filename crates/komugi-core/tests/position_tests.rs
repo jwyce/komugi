@@ -232,6 +232,24 @@ fn draft_done_side_does_not_get_setup_turns_until_both_done() {
 }
 
 #[test]
+fn black_draft_done_ends_draft_immediately_for_both_sides() {
+    let mut gungi = Gungi::new(SetupMode::Intermediate);
+
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let white_done = parse_san("新帥(9-3-1)終", &parsed).unwrap();
+    gungi.make_move(&white_done).unwrap();
+
+    let parsed = parse_fen(&gungi.fen()).unwrap();
+    let black_done = parse_san("新帥(2-9-1)終", &parsed).unwrap();
+    gungi.make_move(&black_done).unwrap();
+
+    assert_eq!(gungi.turn(), Color::White);
+    assert_eq!(gungi.position().drafting_rights, [false, false]);
+    assert!(!gungi.position().in_draft());
+    assert!(gungi.moves().iter().all(|mv| !mv.draft_finished));
+}
+
+#[test]
 fn asymmetric_draft_game208_reproduction() {
     // Reproduce Game 208 from intermediate gen0:
     // 1. 新帥(8-3-1) 新帥(3-5-1) 2. 新大(9-5-1)終 1/2-1/2

@@ -540,20 +540,7 @@ fn append_arata_moves(
     let is_last_piece = player_hand_count == 1;
     let color_drafting = ctx.drafting_rights[usize::from(hand_piece.color as u8)];
 
-    // Minimum 8 pieces on board (after this drop) before 終 is legal.
-    // Count current pieces; if current + 1 >= 8 (i.e. current >= 7), allow draft_finished.
-    const MIN_DRAFT_PIECES: u32 = 8;
-    let can_end_draft = if color_drafting {
-        let pieces_on_board: u32 = SQUARES
-            .iter()
-            .filter_map(|&sq| board.get(sq))
-            .flat_map(Tower::iter)
-            .filter(|p| p.color == hand_piece.color)
-            .count() as u32;
-        pieces_on_board + 1 >= MIN_DRAFT_PIECES
-    } else {
-        false
-    };
+    let can_end_draft = color_drafting;
 
     for rank in ranks.iter().copied() {
         for file in 1..=9 {
@@ -710,6 +697,16 @@ fn get_available_squares(
     let (dy, dx) = dir;
     let (origin_rank, origin_file) = (origin.rank as i8, origin.file as i8);
     let mut available = ArrayVecSquares::new();
+
+    if origin_piece.piece_type == PieceType::Archer && dy.abs() == 1 && dx.abs() == 1 {
+        let wing_rank = origin_rank + dy;
+        let wing_file = origin_file + dx;
+        if let Some((_, wing_tier)) = get_top_coords(board, wing_rank, wing_file) {
+            if wing_tier > origin_tier {
+                return available;
+            }
+        }
+    }
 
     let mut reverse_rank = start.0;
     let mut reverse_file = start.1;

@@ -4,7 +4,7 @@ use komugi_core::movegen::{
     PIECE_PROBES,
 };
 use komugi_core::san::{move_to_san, parse_san};
-use komugi_core::types::{Color, HandPiece, MoveType, PieceType};
+use komugi_core::types::{Color, HandPiece, MoveType, PieceType, Square};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +134,20 @@ fn move_types_include_route_tsuke_and_capture() {
     assert!(capture_moves
         .iter()
         .any(|m| m.move_type == MoveType::Capture));
+}
+
+#[test]
+fn archer_diagonal_probe_blocked_by_taller_wing_stack() {
+    let fen =
+        "4mg3/1r|a:r|in1a|s:f|1/d1fwd3d/2s1w2j1/9/9/D|S:F|1W|D:R|WF1D/1SA1N1ARN/3|G:D|M1I2 J2N1/j1n2d1 w 1 - 7";
+    let state = parse_fen(fen).expect("parse archer blocker fixture");
+    let moves = generate_moves_for_square(&state, Square::new_unchecked(8, 7));
+    let sans: Vec<String> = moves.iter().map(move_to_san).collect();
+
+    assert!(
+        !sans.iter().any(|san| san == "弓(8-7-1)(6-8-1)"),
+        "archer diagonal side probe should be blocked by taller adjacent wing stack"
+    );
 }
 
 #[test]
