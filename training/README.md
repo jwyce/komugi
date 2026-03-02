@@ -59,6 +59,56 @@ python training/export_nnue.py --checkpoint checkpoints_nnue/nnue_final.pt --out
 
 The exported .nnue file (~3.5MB) can be embedded in WASM for client-side inference.
 
+## Post-Gen9 Rulefix Adaptation
+
+When the rules change after `*_gen9` is already trained, do not restart. Recreate the instance with the newest Docker image, copy over last teacher artifacts, and run one short adaptation gen per mode.
+
+### 1) Recreate + copy artifacts
+
+- Rebuild and push the updated training image.
+- Recreate the instance from that image.
+- Copy these teachers into `/workspace/models/`:
+  - `beginner_gen9.onnx`
+  - `intermediate_gen9.onnx`
+  - `advanced_gen9.onnx`
+- Optionally copy matching checkpoint trees for warm-start (`/workspace/checkpoints/{mode}_gen9/`).
+
+### 2) Run adaptation script
+
+```bash
+python training/rulefix_adaptation.py \
+  --workspace /workspace \
+  --tag gen9_rulefix \
+  --games-beginner 1200 \
+  --games-intermediate 1200 \
+  --games-advanced 1500 \
+  --sims 400 \
+  --epochs 25
+```
+
+If you copied `.pt` checkpoints, add warm-start template:
+
+```bash
+python training/rulefix_adaptation.py \
+  --workspace /workspace \
+  --tag gen9_rulefix \
+  --source-checkpoint-template "{checkpoints_dir}/{mode}_gen9/model_epoch_50.pt"
+```
+
+Outputs:
+
+- `/workspace/models/beginner_gen9_rulefix.onnx`
+- `/workspace/models/intermediate_gen9_rulefix.onnx`
+- `/workspace/models/advanced_gen9_rulefix.onnx`
+
+### 3) Continue normal distillation flow
+
+Use the adapted teachers for label generation and NNUE training (same high-sim labelgen plan):
+
+- Beginner labels from `beginner_gen9_rulefix.onnx`
+- Intermediate labels from `intermediate_gen9_rulefix.onnx`
+- Advanced labels from `advanced_gen9_rulefix.onnx`
+
 ## Puzzle Dataset Seeding
 
 Generate an initial puzzle candidate set from self-play JSONL:
