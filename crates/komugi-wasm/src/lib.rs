@@ -17,7 +17,10 @@ use komugi_engine::{
 use serde::Serialize;
 
 /// Embedded NNUE model (3.5MB placeholder)
+#[cfg(not(test))]
 static NNUE_BYTES: &[u8] = include_bytes!("../../../models/gungi.nnue");
+#[cfg(test)]
+static NNUE_BYTES: &[u8] = &[];
 
 /// Initialize panic hook for readable error messages in browser console.
 #[wasm_bindgen(start)]
