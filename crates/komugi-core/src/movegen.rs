@@ -368,6 +368,8 @@ fn generate_all_moves_with_mode(
     hand: Option<&[HandPiece]>,
     enforce_legality: bool,
 ) -> MoveList {
+    let empty_hand: [HandPiece; 0] = [];
+    let hand = hand.unwrap_or(&empty_hand);
     let max_tier = max_tier_for_mode(mode);
     let marshal_can_stack = matches!(mode, SetupMode::Advanced | SetupMode::Intermediate);
     let marshal_square = find_marshal_square(board, turn);
@@ -423,51 +425,24 @@ fn generate_all_moves_with_mode(
                 // Betrayal — only for enemy tops, inside tsuke block so it
                 // inherits the "not Marshal" check (BUG #3 fix).
                 // Matches gungi.js move_gen.ts line 147.
-                if piece.piece_type == PieceType::Tactician && top_piece.color != turn {
+                if piece.piece_type == PieceType::Tactician {
                     if let Some(tower) = board.get(target_square) {
-                        let mut enemies = arrayvec::ArrayVec::<Piece, 3>::new();
-                        for p in tower.iter().filter(|p| p.color != turn) {
-                            let _ = enemies.try_push(p);
-                        }
-
-                        if !enemies.is_empty() {
-                            let mut enemy_count = [0u8; 14];
-                            for e in &enemies {
-                                enemy_count[e.piece_type as usize] += 1;
+                        let betrayal_combos = get_betrayal_combos(*tower, hand, turn);
+                        for combo in betrayal_combos {
+                            let mut mv = Move::new(
+                                turn,
+                                piece.piece_type,
+                                Some(from),
+                                TieredSquare::new_unchecked(target_square, top_tier + 1),
+                                MoveType::Betray,
+                            );
+                            for p in combo {
+                                let _ = mv.captured.try_push(p);
                             }
-
-                            let mut hand_count = [0u8; 14];
-                            if let Some(hand) = hand {
-                                for hp in hand.iter().filter(|h| h.color == turn) {
-                                    hand_count[hp.piece_type as usize] = hp.count;
-                                }
-                            }
-
-                            let mut betrayal_options = arrayvec::ArrayVec::<Piece, 3>::new();
-                            for e in &enemies {
-                                let needed = enemy_count[e.piece_type as usize];
-                                let have = hand_count[e.piece_type as usize];
-                                if have >= needed {
-                                    let _ = betrayal_options.try_push(*e);
-                                }
-                            }
-
-                            for combo in combinations(&betrayal_options) {
-                                let mut mv = Move::new(
-                                    turn,
-                                    piece.piece_type,
-                                    Some(from),
-                                    TieredSquare::new_unchecked(target_square, top_tier + 1),
-                                    MoveType::Betray,
-                                );
-                                for p in combo {
-                                    let _ = mv.captured.try_push(p);
-                                }
-                                if !enforce_legality
-                                    || is_legal_after_move(board, turn, &mv, marshal_square)
-                                {
-                                    let _ = legal.try_push(mv);
-                                }
+                            if !enforce_legality
+                                || is_legal_after_move(board, turn, &mv, marshal_square)
+                            {
+                                let _ = legal.try_push(mv);
                             }
                         }
                     }

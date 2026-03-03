@@ -628,6 +628,55 @@ fn betrayal_not_generated_on_marshal_top() {
 }
 
 #[test]
+fn tactician_board_move_can_betray_with_enemy_below_friendly_top() {
+    let candidates = [
+        "4m4/9/9/9/9/9/5|d:D|3/4|D:T|4/4M4 D1/- w 3 - 1",
+        "4m4/9/9/9/9/9/3|d:D|5/4|D:T|4/4M4 D1/- w 3 - 1",
+    ];
+
+    let target = Square::new_unchecked(7, 6);
+    let scenario = candidates
+        .iter()
+        .filter_map(|fen| Gungi::from_fen(fen).ok())
+        .find(|gungi| {
+            let Some((tactician, tier)) =
+                gungi.position().board.get_top(Square::new_unchecked(8, 5))
+            else {
+                return false;
+            };
+            if tactician.piece_type != PieceType::Tactician
+                || tactician.color != Color::White
+                || tier < 2
+            {
+                return false;
+            }
+            let Some(tower) = gungi.position().board.get(target) else {
+                return false;
+            };
+            let Some((top, _)) = tower.get_top() else {
+                return false;
+            };
+            top.color == Color::White && tower.iter().any(|piece| piece.color == Color::Black)
+        })
+        .expect("one candidate must place mixed tower with friendly top at target");
+
+    let moves = scenario.moves();
+    let found = moves.iter().any(|mv| {
+        mv.move_type == MoveType::Betray
+            && mv.piece == PieceType::Tactician
+            && mv.to.square == target
+            && mv.captured.iter().any(|piece| piece.color == Color::Black)
+    });
+
+    let sans: Vec<String> = moves.iter().map(|m| komugi_core::move_to_san(m)).collect();
+
+    assert!(
+        found,
+        "expected tactician betrayal move onto friendly-top mixed tower, got moves: {sans:?}"
+    );
+}
+
+#[test]
 fn arata_tactician_can_betray_enemy_in_target_tower() {
     let mut gungi = Gungi::from_fen("4m4/9/9/9/9/9/9/4|d:D|4/4M4 T1D1/- w 3 - 1").unwrap();
 
