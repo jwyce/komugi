@@ -545,6 +545,7 @@ fn append_arata_moves(
     for rank in ranks.iter().copied() {
         for file in 1..=9 {
             let target = Square::new_unchecked(rank, file);
+            let target_tower = board.get(target).copied();
             let top = board.get_top(target);
             if let Some((piece, tier)) = top {
                 if piece.color != hand_piece.color
@@ -556,6 +557,13 @@ fn append_arata_moves(
             }
 
             let next_tier = top.map(|(_, tier)| tier + 1).unwrap_or(1);
+            let betrayal_combos = if hand_piece.piece_type == PieceType::Tactician {
+                target_tower
+                    .map(|tower| get_betrayal_combos(tower, ctx.hand, hand_piece.color))
+                    .unwrap_or_default()
+            } else {
+                arrayvec::ArrayVec::new()
+            };
 
             if color_drafting {
                 if !is_last_piece {
@@ -570,6 +578,29 @@ fn append_arata_moves(
                         || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
                     {
                         let _ = all.try_push(mv);
+                    }
+
+                    for combo in &betrayal_combos {
+                        let mut betray_mv = Move::new(
+                            hand_piece.color,
+                            hand_piece.piece_type,
+                            None,
+                            TieredSquare::new_unchecked(target, next_tier),
+                            MoveType::Arata,
+                        );
+                        for piece in combo {
+                            let _ = betray_mv.captured.try_push(*piece);
+                        }
+                        if !ctx.enforce_legality
+                            || is_legal_after_move(
+                                board,
+                                hand_piece.color,
+                                &betray_mv,
+                                ctx.marshal_square,
+                            )
+                        {
+                            let _ = all.try_push(betray_mv);
+                        }
                     }
                 }
 
@@ -587,6 +618,30 @@ fn append_arata_moves(
                     {
                         let _ = all.try_push(mv);
                     }
+
+                    for combo in &betrayal_combos {
+                        let mut betray_mv = Move::new(
+                            hand_piece.color,
+                            hand_piece.piece_type,
+                            None,
+                            TieredSquare::new_unchecked(target, next_tier),
+                            MoveType::Arata,
+                        );
+                        betray_mv.draft_finished = true;
+                        for piece in combo {
+                            let _ = betray_mv.captured.try_push(*piece);
+                        }
+                        if !ctx.enforce_legality
+                            || is_legal_after_move(
+                                board,
+                                hand_piece.color,
+                                &betray_mv,
+                                ctx.marshal_square,
+                            )
+                        {
+                            let _ = all.try_push(betray_mv);
+                        }
+                    }
                 }
             } else {
                 let mv = Move::new(
@@ -600,6 +655,29 @@ fn append_arata_moves(
                     || is_legal_after_move(board, hand_piece.color, &mv, ctx.marshal_square)
                 {
                     let _ = all.try_push(mv);
+                }
+
+                for combo in &betrayal_combos {
+                    let mut betray_mv = Move::new(
+                        hand_piece.color,
+                        hand_piece.piece_type,
+                        None,
+                        TieredSquare::new_unchecked(target, next_tier),
+                        MoveType::Arata,
+                    );
+                    for piece in combo {
+                        let _ = betray_mv.captured.try_push(*piece);
+                    }
+                    if !ctx.enforce_legality
+                        || is_legal_after_move(
+                            board,
+                            hand_piece.color,
+                            &betray_mv,
+                            ctx.marshal_square,
+                        )
+                    {
+                        let _ = all.try_push(betray_mv);
+                    }
                 }
             }
         }
@@ -799,6 +877,41 @@ fn combinations(items: &[Piece]) -> arrayvec::ArrayVec<arrayvec::ArrayVec<Piece,
     out
 }
 
+fn get_betrayal_combos(
+    tower: Tower,
+    hand: &[HandPiece],
+    color: Color,
+) -> arrayvec::ArrayVec<arrayvec::ArrayVec<Piece, 3>, 7> {
+    let mut enemies = arrayvec::ArrayVec::<Piece, 3>::new();
+    for p in tower.iter().filter(|p| p.color != color) {
+        let _ = enemies.try_push(p);
+    }
+    if enemies.is_empty() {
+        return arrayvec::ArrayVec::new();
+    }
+
+    let mut enemy_count = [0u8; 14];
+    for enemy in &enemies {
+        enemy_count[enemy.piece_type as usize] += 1;
+    }
+
+    let mut hand_count = [0u8; 14];
+    for hp in hand.iter().filter(|h| h.color == color) {
+        hand_count[hp.piece_type as usize] = hp.count;
+    }
+
+    let mut betrayal_options = arrayvec::ArrayVec::<Piece, 3>::new();
+    for enemy in &enemies {
+        let needed = enemy_count[enemy.piece_type as usize];
+        let have = hand_count[enemy.piece_type as usize];
+        if have >= needed {
+            let _ = betrayal_options.try_push(*enemy);
+        }
+    }
+
+    combinations(&betrayal_options)
+}
+
 fn is_legal_after_move(
     board: &mut Board,
     turn: Color,
@@ -840,7 +953,11 @@ fn apply_move_on_board(board: &mut Board, mv: &Move) -> MoveUndo {
             }
             let _ = board.convert(mv.to.square, &mv.captured);
         }
-        MoveType::Arata => {}
+        MoveType::Arata => {
+            if !mv.captured.is_empty() {
+                let _ = board.convert(mv.to.square, &mv.captured);
+            }
+        }
     }
 
     let _ = board.put(

@@ -31,7 +31,9 @@ pub fn move_to_san(mv: &Move) -> String {
     }
     san.push_str(&to);
 
-    if mv.move_type == MoveType::Betray {
+    if mv.move_type == MoveType::Betray
+        || (mv.move_type == MoveType::Arata && !mv.captured.is_empty())
+    {
         san.push(SAN_BETRAY);
         for p in &mv.captured {
             san.push(p.piece_type.kanji());

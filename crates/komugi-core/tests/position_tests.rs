@@ -626,3 +626,39 @@ fn betrayal_not_generated_on_marshal_top() {
     assert!(!sans.iter().any(|s| s.contains('返')));
     assert!(sans.contains(&"謀(8-5-1)取(7-6-1)".to_string()));
 }
+
+#[test]
+fn arata_tactician_can_betray_enemy_in_target_tower() {
+    let mut gungi = Gungi::from_fen("4m4/9/9/9/9/9/9/4|d:D|4/4M4 T1D1/- w 3 - 1").unwrap();
+
+    let moves = gungi.moves();
+    let sans: Vec<String> = moves.iter().map(|m| komugi_core::move_to_san(m)).collect();
+
+    assert!(
+        sans.contains(&"新謀(8-5-3)返兵".to_string()),
+        "arata tactician betrayal SAN should be generated"
+    );
+    assert!(
+        sans.contains(&"新謀(8-5-3)付".to_string()),
+        "plain arata tactician tsuke SAN should still be generated"
+    );
+
+    let betray_arata = moves
+        .iter()
+        .find(|mv| {
+            mv.move_type == MoveType::Arata
+                && mv.piece == PieceType::Tactician
+                && mv.to.square == Square::new_unchecked(8, 5)
+                && mv.captured.len() == 1
+                && mv.captured[0].piece_type == PieceType::Soldier
+        })
+        .cloned()
+        .expect("arata betrayal move should exist");
+
+    gungi.make_move(&betray_arata).unwrap();
+    let fen = gungi.fen();
+    assert!(
+        fen.starts_with("4m4/9/9/9/9/9/9/4|D:D:T|4/4M4 -/- b 3 -"),
+        "arata betrayal should convert enemy soldier and consume matching hand piece: {fen}"
+    );
+}

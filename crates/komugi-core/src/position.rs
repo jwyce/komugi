@@ -246,6 +246,21 @@ impl Position {
                     old_count,
                     new_count,
                 );
+                if !mv.captured.is_empty() {
+                    let _ = self.board.convert(mv.to.square, &mv.captured)?;
+                    for captured in &mv.captured {
+                        let (idx, old_count, new_count) =
+                            self.decrement_hand_piece(mv.color, captured.piece_type)?;
+                        let _ = entry.betrayal_hand_indices.try_push(idx);
+                        zobrist_keys().update_hand_count(
+                            &mut self.zobrist_hash,
+                            captured.piece_type,
+                            mv.color,
+                            old_count,
+                            new_count,
+                        );
+                    }
+                }
                 if mv.draft_finished {
                     if self.drafting_rights[color_idx(mv.color)] {
                         zobrist_keys().xor_drafting(&mut self.zobrist_hash, mv.color);
