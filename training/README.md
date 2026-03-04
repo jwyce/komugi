@@ -61,7 +61,7 @@ The exported .nnue file (~3.5MB) can be embedded in WASM for client-side inferen
 
 ## Post-Gen9 Rulefix Adaptation
 
-When the rules change after `*_gen9` is already trained, do not restart. Recreate the instance with the newest Docker image, copy over last teacher artifacts, and run one short adaptation gen per mode.
+When the rules change after `*_gen9` is already trained, do not restart. Recreate the instance with the newest Docker image, copy over last teacher artifacts, then run adaptation passes.
 
 ### 1) Recreate + copy artifacts
 
@@ -75,13 +75,17 @@ When the rules change after `*_gen9` is already trained, do not restart. Recreat
 
 ### 2) Run adaptation script
 
+Recommended for current rule deltas: two-pass advanced adaptation (coverage + stabilization).
+
 ```bash
 python training/rulefix_adaptation.py \
   --workspace /workspace \
   --tag gen9_rulefix \
   --games-beginner 1200 \
   --games-intermediate 1200 \
-  --games-advanced 1500 \
+  --games-advanced 5000 \
+  --advanced-two-pass \
+  --games-advanced-second-pass 2000 \
   --sims 400 \
   --epochs 25
 ```
@@ -95,11 +99,13 @@ python training/rulefix_adaptation.py \
   --source-checkpoint-template "{checkpoints_dir}/{mode}_gen9/model_epoch_50.pt"
 ```
 
-Outputs:
+Outputs (with `--advanced-two-pass`):
 
 - `/workspace/models/beginner_gen9_rulefix.onnx`
 - `/workspace/models/intermediate_gen9_rulefix.onnx`
-- `/workspace/models/advanced_gen9_rulefix.onnx`
+- `/workspace/models/advanced_gen9_rulefix_a.onnx`
+- `/workspace/models/advanced_gen9_rulefix_b.onnx`
+- `/workspace/models/advanced_gen9_rulefix.onnx` (alias of pass B)
 
 ### 3) Continue normal distillation flow
 

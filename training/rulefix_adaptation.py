@@ -21,6 +21,123 @@ def run_cmd(cmd: list[str], cwd: Path, dry_run: bool) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def run_adaptation_pass(
+    *,
+    mode: str,
+    gen_label: str,
+    games: int,
+    sims: int,
+    threads: int,
+    workspace: Path,
+    train_dir: Path,
+    data_dir: Path,
+    models_dir: Path,
+    checkpoints_dir: Path,
+    model_in: Path,
+    resume_from: Path | None,
+    gpus: int,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    device: str,
+    save_every: int,
+    num_blocks: int,
+    channels: int,
+    dry_run: bool,
+) -> tuple[Path, Path]:
+    data_file = data_dir / f"{gen_label}.jsonl"
+    prep_dir = data_dir / f"{gen_label}_preprocessed"
+    ckpt_dir = checkpoints_dir / gen_label
+    out_model = models_dir / f"{gen_label}.onnx"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 72)
+    print(f"[{gen_label}] self-play")
+    run_cmd(
+        [
+            "selfplay",
+            str(games),
+            str(data_file),
+            str(sims),
+            str(model_in),
+            mode,
+            str(threads),
+        ],
+        cwd=workspace,
+        dry_run=dry_run,
+    )
+
+    print(f"[{gen_label}] preprocess")
+    run_cmd(
+        ["python", "preprocess.py", str(data_file), str(prep_dir)],
+        cwd=train_dir,
+        dry_run=dry_run,
+    )
+
+    resume_arg: list[str] = []
+    if resume_from is not None and (resume_from.exists() or dry_run):
+        resume_arg = ["--resume", str(resume_from)]
+
+    print(f"[{gen_label}] train")
+    train_cmd = [
+        "python",
+        "train.py",
+        "--data",
+        str(prep_dir),
+        "--epochs",
+        str(epochs),
+        "--batch-size",
+        str(batch_size),
+        "--lr",
+        str(lr),
+        "--device",
+        str(device),
+        "--save-every",
+        str(save_every),
+        "--output-dir",
+        str(ckpt_dir),
+        "--num-blocks",
+        str(num_blocks),
+        "--channels",
+        str(channels),
+    ] + resume_arg
+
+    if gpus > 1:
+        train_cmd = [
+            "torchrun",
+            "--standalone",
+            "--nproc_per_node",
+            str(gpus),
+        ] + train_cmd[1:]
+
+    run_cmd(train_cmd, cwd=train_dir, dry_run=dry_run)
+
+    chosen_ckpt = best_checkpoint(ckpt_dir)
+    if chosen_ckpt is None and not dry_run:
+        raise RuntimeError(f"No checkpoint produced for {gen_label}")
+
+    print(f"[{gen_label}] export onnx")
+    run_cmd(
+        [
+            "python",
+            "export_onnx.py",
+            "--checkpoint",
+            str(chosen_ckpt or (ckpt_dir / "model_epoch_1.pt")),
+            "--output",
+            str(out_model),
+            "--num-blocks",
+            str(num_blocks),
+            "--channels",
+            str(channels),
+        ],
+        cwd=train_dir,
+        dry_run=dry_run,
+    )
+
+    print(f"[{gen_label}] complete -> {out_model}")
+    return out_model, chosen_ckpt or (ckpt_dir / "model_epoch_1.pt")
+
+
 def best_checkpoint(
     ckpt_dir: Path, policy_w: float = 1.0, value_w: float = 1.0
 ) -> Path | None:
@@ -78,6 +195,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--games-beginner", type=int, default=1200)
     parser.add_argument("--games-intermediate", type=int, default=1200)
     parser.add_argument("--games-advanced", type=int, default=1500)
+    parser.add_argument("--advanced-two-pass", action="store_true")
+    parser.add_argument("--games-advanced-second-pass", type=int, default=2000)
     parser.add_argument("--sims", type=int, default=400)
     parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
     parser.add_argument("--epochs", type=int, default=25)
@@ -138,38 +257,9 @@ def main() -> None:
         if not model_in.exists() and not args.dry_run:
             raise FileNotFoundError(f"Missing source model for {mode}: {model_in}")
 
-        data_file = data_dir / f"{gen_label}.jsonl"
-        prep_dir = data_dir / f"{gen_label}_preprocessed"
-        ckpt_dir = checkpoints_dir / gen_label
-        out_model = models_dir / f"{gen_label}.onnx"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        print("=" * 72)
-        print(f"[{gen_label}] self-play")
-        run_cmd(
-            [
-                "selfplay",
-                str(games),
-                str(data_file),
-                str(args.sims),
-                str(model_in),
-                mode,
-                str(args.threads),
-            ],
-            cwd=workspace,
-            dry_run=args.dry_run,
-        )
-
-        print(f"[{gen_label}] preprocess")
-        run_cmd(
-            ["python", "preprocess.py", str(data_file), str(prep_dir)],
-            cwd=train_dir,
-            dry_run=args.dry_run,
-        )
-
-        resume_arg: list[str] = []
+        resume_path: Path | None = None
         if args.source_checkpoint_template:
-            resume_path = Path(
+            candidate = Path(
                 args.source_checkpoint_template.format(
                     mode=mode,
                     models_dir=models_dir,
@@ -178,66 +268,95 @@ def main() -> None:
                     tag=args.tag,
                 )
             )
-            if resume_path.exists() or args.dry_run:
-                resume_arg = ["--resume", str(resume_path)]
+            if candidate.exists() or args.dry_run:
+                resume_path = candidate
 
-        print(f"[{gen_label}] train")
-        train_cmd = [
-            "python",
-            "train.py",
-            "--data",
-            str(prep_dir),
-            "--epochs",
-            str(args.epochs),
-            "--batch-size",
-            str(args.batch_size),
-            "--lr",
-            str(args.lr),
-            "--device",
-            str(args.device),
-            "--save-every",
-            str(args.save_every),
-            "--output-dir",
-            str(ckpt_dir),
-            "--num-blocks",
-            str(args.num_blocks),
-            "--channels",
-            str(args.channels),
-        ] + resume_arg
+        if mode == "advanced" and args.advanced_two_pass:
+            pass1_label = f"{gen_label}_a"
+            pass2_label = f"{gen_label}_b"
+            print(
+                f"[{mode}] two-pass adaptation enabled: pass1={games} games, pass2={args.games_advanced_second_pass} games"
+            )
 
-        if gpus > 1:
-            train_cmd = [
-                "torchrun",
-                "--standalone",
-                "--nproc_per_node",
-                str(gpus),
-            ] + train_cmd[1:]
+            pass1_model, pass1_ckpt = run_adaptation_pass(
+                mode=mode,
+                gen_label=pass1_label,
+                games=games,
+                sims=args.sims,
+                threads=args.threads,
+                workspace=workspace,
+                train_dir=train_dir,
+                data_dir=data_dir,
+                models_dir=models_dir,
+                checkpoints_dir=checkpoints_dir,
+                model_in=model_in,
+                resume_from=resume_path,
+                gpus=gpus,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                device=args.device,
+                save_every=args.save_every,
+                num_blocks=args.num_blocks,
+                channels=args.channels,
+                dry_run=args.dry_run,
+            )
 
-        run_cmd(train_cmd, cwd=train_dir, dry_run=args.dry_run)
+            pass2_model, _ = run_adaptation_pass(
+                mode=mode,
+                gen_label=pass2_label,
+                games=args.games_advanced_second_pass,
+                sims=args.sims,
+                threads=args.threads,
+                workspace=workspace,
+                train_dir=train_dir,
+                data_dir=data_dir,
+                models_dir=models_dir,
+                checkpoints_dir=checkpoints_dir,
+                model_in=pass1_model,
+                resume_from=pass1_ckpt,
+                gpus=gpus,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                device=args.device,
+                save_every=args.save_every,
+                num_blocks=args.num_blocks,
+                channels=args.channels,
+                dry_run=args.dry_run,
+            )
 
-        chosen_ckpt = best_checkpoint(ckpt_dir)
-        if chosen_ckpt is None and not args.dry_run:
-            raise RuntimeError(f"No checkpoint produced for {gen_label}")
-
-        print(f"[{gen_label}] export onnx")
-        run_cmd(
-            [
-                "python",
-                "export_onnx.py",
-                "--checkpoint",
-                str(chosen_ckpt or (ckpt_dir / "model_epoch_1.pt")),
-                "--output",
-                str(out_model),
-                "--num-blocks",
-                str(args.num_blocks),
-                "--channels",
-                str(args.channels),
-            ],
-            cwd=train_dir,
-            dry_run=args.dry_run,
-        )
-
-        print(f"[{gen_label}] complete -> {out_model}")
+            final_alias = models_dir / f"{gen_label}.onnx"
+            run_cmd(
+                ["cp", str(pass2_model), str(final_alias)],
+                cwd=workspace,
+                dry_run=args.dry_run,
+            )
+            print(f"[{mode}] final alias -> {final_alias}")
+        else:
+            run_adaptation_pass(
+                mode=mode,
+                gen_label=gen_label,
+                games=games,
+                sims=args.sims,
+                threads=args.threads,
+                workspace=workspace,
+                train_dir=train_dir,
+                data_dir=data_dir,
+                models_dir=models_dir,
+                checkpoints_dir=checkpoints_dir,
+                model_in=model_in,
+                resume_from=resume_path,
+                gpus=gpus,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                device=args.device,
+                save_every=args.save_every,
+                num_blocks=args.num_blocks,
+                channels=args.channels,
+                dry_run=args.dry_run,
+            )
 
     print("=" * 72)
     print("Rulefix adaptation complete")
