@@ -25,6 +25,18 @@ fn find_move(
         .ok_or(PositionError::Fen("expected move not found".to_string()))
 }
 
+fn play_non_ending_draft_plies(gungi: &mut Gungi, plies: usize) {
+    for _ in 0..plies {
+        let mv = gungi
+            .moves()
+            .iter()
+            .find(|mv| mv.move_type == MoveType::Arata && !mv.draft_finished)
+            .cloned()
+            .expect("expected a non-ending draft move");
+        gungi.make_move(&mv).unwrap();
+    }
+}
+
 #[test]
 fn make_unmake_round_trip_restores_position() {
     let mut position = Position::new(SetupMode::Beginner);
@@ -150,8 +162,8 @@ fn draft_move_generation_marks_end_moves() {
     assert!(!one_left_moves.is_empty());
     assert!(one_left_moves.iter().all(|mv| mv.draft_finished));
 
-    let many_left =
-        Gungi::from_fen("9/9/9/9/9/9/9/9/4M4 D2/m1g1i1j2w2n3r2s2f2d4c1a2k1t1 w 3 w 1").unwrap();
+    let mut many_left = Gungi::new(SetupMode::Intermediate);
+    play_non_ending_draft_plies(&mut many_left, 14);
     let many_left_moves = many_left.moves();
     assert!(many_left_moves.iter().any(|mv| mv.draft_finished));
     assert!(many_left_moves.iter().any(|mv| !mv.draft_finished));
@@ -166,6 +178,10 @@ fn intermediate_draft_rank_restrictions_match_rules() {
     assert!(white_moves
         .iter()
         .all(|mv| { mv.move_type == MoveType::Arata && (7..=9).contains(&mv.to.square.rank) }));
+    assert!(white_moves.iter().all(|mv| !mv.draft_finished));
+
+    play_non_ending_draft_plies(&mut gungi, 14);
+    let white_moves = gungi.moves();
 
     let white_end = white_moves
         .iter()
@@ -185,11 +201,22 @@ fn intermediate_draft_rank_restrictions_match_rules() {
 fn once_white_done_only_black_setup_moves_are_legal_until_black_done() {
     let mut gungi = Gungi::new(SetupMode::Intermediate);
 
-    for san in ["新帥(9-3-1)終", "新帥(2-9-1)"] {
-        let parsed = parse_fen(&gungi.fen()).unwrap();
-        let mv = parse_san(san, &parsed).unwrap();
-        gungi.make_move(&mv).unwrap();
-    }
+    play_non_ending_draft_plies(&mut gungi, 14);
+    let white_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| mv.color == Color::White && mv.draft_finished)
+        .cloned()
+        .expect("white should have a draft-ending move once minimum pieces are placed");
+    gungi.make_move(&white_done).unwrap();
+
+    let black_non_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| mv.color == Color::Black && !mv.draft_finished)
+        .cloned()
+        .expect("black should have non-ending draft move");
+    gungi.make_move(&black_non_done).unwrap();
 
     assert!(gungi.position().in_draft());
     assert_eq!(gungi.position().drafting_rights, [false, true]);
@@ -206,8 +233,13 @@ fn once_white_done_only_black_setup_moves_are_legal_until_black_done() {
 fn draft_done_side_does_not_get_setup_turns_until_both_done() {
     let mut gungi = Gungi::new(SetupMode::Intermediate);
 
-    let parsed = parse_fen(&gungi.fen()).unwrap();
-    let white_done = parse_san("新帥(9-3-1)終", &parsed).unwrap();
+    play_non_ending_draft_plies(&mut gungi, 14);
+    let white_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| mv.color == Color::White && mv.draft_finished)
+        .cloned()
+        .expect("white should have a draft-ending move once minimum pieces are placed");
     gungi.make_move(&white_done).unwrap();
 
     assert_eq!(gungi.turn(), Color::Black);
@@ -235,12 +267,21 @@ fn draft_done_side_does_not_get_setup_turns_until_both_done() {
 fn black_draft_done_ends_draft_immediately_for_both_sides() {
     let mut gungi = Gungi::new(SetupMode::Intermediate);
 
-    let parsed = parse_fen(&gungi.fen()).unwrap();
-    let white_done = parse_san("新帥(9-3-1)終", &parsed).unwrap();
+    play_non_ending_draft_plies(&mut gungi, 14);
+    let white_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| mv.color == Color::White && mv.draft_finished)
+        .cloned()
+        .expect("white should have a draft-ending move once minimum pieces are placed");
     gungi.make_move(&white_done).unwrap();
 
-    let parsed = parse_fen(&gungi.fen()).unwrap();
-    let black_done = parse_san("新帥(2-9-1)終", &parsed).unwrap();
+    let black_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| mv.color == Color::Black && mv.draft_finished)
+        .cloned()
+        .expect("black should have a draft-ending move after white has ended");
     gungi.make_move(&black_done).unwrap();
 
     assert_eq!(gungi.turn(), Color::White);
@@ -251,27 +292,16 @@ fn black_draft_done_ends_draft_immediately_for_both_sides() {
 
 #[test]
 fn asymmetric_draft_game208_reproduction() {
-    // Reproduce Game 208 from intermediate gen0:
-    // 1. 新帥(8-3-1) 新帥(3-5-1) 2. 新大(9-5-1)終 1/2-1/2
-    // After White ends draft at ply 3, Black should have hundreds of legal moves.
     let mut gungi = Gungi::new(SetupMode::Intermediate);
 
-    // Ply 1: White drops Marshal at (8,3,1)
-    let parsed = parse_fen(&gungi.fen()).unwrap();
-    let w1 = parse_san("新帥(8-3-1)", &parsed).unwrap();
-    gungi.make_move(&w1).unwrap();
-    assert_eq!(gungi.turn(), Color::Black);
-
-    // Ply 2: Black drops Marshal at (3,5,1)
-    let parsed = parse_fen(&gungi.fen()).unwrap();
-    let b1 = parse_san("新帥(3-5-1)", &parsed).unwrap();
-    gungi.make_move(&b1).unwrap();
-    assert_eq!(gungi.turn(), Color::White);
-
-    // Ply 3: White drops LieutenantGeneral at (9,5,1) AND ends draft
-    let parsed = parse_fen(&gungi.fen()).unwrap();
-    let w2 = parse_san("新大(9-5-1)終", &parsed).unwrap();
-    gungi.make_move(&w2).unwrap();
+    play_non_ending_draft_plies(&mut gungi, 14);
+    let white_done = gungi
+        .moves()
+        .iter()
+        .find(|mv| mv.color == Color::White && mv.draft_finished)
+        .cloned()
+        .expect("white should have a draft-ending move once minimum pieces are placed");
+    gungi.make_move(&white_done).unwrap();
 
     // After White ends draft: Black's turn, Black still drafting
     assert_eq!(gungi.turn(), Color::Black);

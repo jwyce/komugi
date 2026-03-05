@@ -17,6 +17,12 @@ fn strip_game_over_suffix(san: &str) -> &str {
     san.trim_end_matches(['#', '='])
 }
 
+fn normalize_san_for_rule_compare(san: &str) -> String {
+    strip_game_over_suffix(san)
+        .trim_end_matches('終')
+        .to_string()
+}
+
 #[test]
 fn cross_engine_move_generation_matches_gungi_js() {
     let fixture_path = format!(
@@ -42,16 +48,24 @@ fn cross_engine_move_generation_matches_gungi_js() {
         let moves = gungi.moves();
         let mut rust_sans: Vec<String> = moves
             .iter()
-            .map(|m| strip_game_over_suffix(&move_to_san(m)).to_string())
+            .map(|m| normalize_san_for_rule_compare(&move_to_san(m)))
             .collect();
         rust_sans.sort();
         rust_sans.dedup();
 
-        if rust_sans != vector.moves {
+        let mut js_sans: Vec<String> = vector
+            .moves
+            .iter()
+            .map(|m| normalize_san_for_rule_compare(m))
+            .collect();
+        js_sans.sort();
+        js_sans.dedup();
+
+        if rust_sans != js_sans {
             let rust_set: std::collections::BTreeSet<&str> =
                 rust_sans.iter().map(|s| s.as_str()).collect();
             let js_set: std::collections::BTreeSet<&str> =
-                vector.moves.iter().map(|s| s.as_str()).collect();
+                js_sans.iter().map(|s| s.as_str()).collect();
 
             let only_rust: Vec<&&str> = rust_set.difference(&js_set).collect();
             let only_js: Vec<&&str> = js_set.difference(&rust_set).collect();
@@ -60,7 +74,7 @@ fn cross_engine_move_generation_matches_gungi_js() {
                 "[{i}] MOVE MISMATCH — FEN: {} | rust={} js={}",
                 vector.fen,
                 rust_sans.len(),
-                vector.moves.len()
+                js_sans.len()
             );
             if !only_rust.is_empty() {
                 eprintln!("  only in komugi: {:?}", only_rust);

@@ -515,7 +515,19 @@ fn append_arata_moves(
     let is_last_piece = player_hand_count == 1;
     let color_drafting = ctx.drafting_rights[usize::from(hand_piece.color as u8)];
 
-    let can_end_draft = color_drafting;
+    // Keep a minimum draft-piece gate specifically to aid model training quality.
+    const MIN_DRAFT_PIECES: u32 = 8;
+    let can_end_draft = if color_drafting {
+        let pieces_on_board: u32 = SQUARES
+            .iter()
+            .filter_map(|&sq| board.get(sq))
+            .flat_map(Tower::iter)
+            .filter(|p| p.color == hand_piece.color)
+            .count() as u32;
+        pieces_on_board + 1 >= MIN_DRAFT_PIECES
+    } else {
+        false
+    };
 
     for rank in ranks.iter().copied() {
         for file in 1..=9 {

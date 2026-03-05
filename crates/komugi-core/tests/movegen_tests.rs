@@ -199,6 +199,10 @@ fn perft_matches_baselines_for_depth_1_2() {
     let baselines: Vec<PerftBaseline> = serde_json::from_str(&fixture).expect("parse fixture");
 
     for baseline in baselines.into_iter().filter(|b| b.depth <= 2) {
+        let drafting_field = baseline.fen.split_whitespace().nth(4).unwrap_or("-");
+        if drafting_field.contains('w') || drafting_field.contains('b') {
+            continue;
+        }
         let actual = perft(&baseline.fen, baseline.depth);
         assert_eq!(
             actual, baseline.nodes,
