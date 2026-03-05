@@ -52,20 +52,23 @@ def run_adaptation_pass(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 72)
-    print(f"[{gen_label}] self-play")
-    run_cmd(
-        [
-            "selfplay",
-            str(games),
-            str(data_file),
-            str(sims),
-            str(model_in),
-            mode,
-            str(threads),
-        ],
-        cwd=workspace,
-        dry_run=dry_run,
-    )
+    if data_file.exists() and data_file.stat().st_size > 0:
+        print(f"[{gen_label}] reusing existing self-play data: {data_file}")
+    else:
+        print(f"[{gen_label}] self-play")
+        run_cmd(
+            [
+                "selfplay",
+                str(games),
+                str(data_file),
+                str(sims),
+                str(model_in),
+                mode,
+                str(threads),
+            ],
+            cwd=workspace,
+            dry_run=dry_run,
+        )
 
     print(f"[{gen_label}] preprocess")
     run_cmd(
@@ -225,7 +228,15 @@ def main() -> None:
     data_dir = workspace / "data"
     models_dir = workspace / "models"
     checkpoints_dir = workspace / "checkpoints"
-    train_dir = workspace / "training"
+    candidate_train_dir = workspace / "training"
+    if (candidate_train_dir / "train.py").exists():
+        train_dir = candidate_train_dir
+    elif (workspace / "train.py").exists():
+        train_dir = workspace
+    else:
+        raise FileNotFoundError(
+            "Could not find training scripts. Expected train.py in /workspace/training or /workspace."
+        )
 
     data_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +252,7 @@ def main() -> None:
     print(f"Detected GPUs: {gpus}")
     print(f"Modes: {', '.join(args.modes)}")
     print(f"Tag: {args.tag}")
+    print(f"Training script directory: {train_dir}")
 
     for mode in args.modes:
         games = games_by_mode[mode]
