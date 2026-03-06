@@ -21,6 +21,17 @@ def run_cmd(cmd: list[str], cwd: Path, dry_run: bool) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def count_pgn_games(pgn_path: Path) -> int:
+    if not pgn_path.exists():
+        return 0
+    games = 0
+    with pgn_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith('[Game "'):
+                games += 1
+    return games
+
+
 def run_adaptation_pass(
     *,
     mode: str,
@@ -46,15 +57,33 @@ def run_adaptation_pass(
     dry_run: bool,
 ) -> tuple[Path, Path]:
     data_file = data_dir / f"{gen_label}.jsonl"
+    pgn_file = data_dir / f"{gen_label}.pgn"
     prep_dir = data_dir / f"{gen_label}_preprocessed"
     ckpt_dir = checkpoints_dir / gen_label
     out_model = models_dir / f"{gen_label}.onnx"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 72)
-    if data_file.exists() and data_file.stat().st_size > 0:
-        print(f"[{gen_label}] reusing existing self-play data: {data_file}")
+    existing_games = count_pgn_games(pgn_file)
+    has_complete_selfplay = (
+        data_file.exists()
+        and data_file.stat().st_size > 0
+        and pgn_file.exists()
+        and existing_games >= games
+    )
+
+    if has_complete_selfplay:
+        print(
+            f"[{gen_label}] reusing existing self-play data: {data_file} ({existing_games}/{games} games in PGN)"
+        )
     else:
+        if data_file.exists() or pgn_file.exists():
+            print(
+                f"[{gen_label}] found incomplete self-play artifacts (PGN games: {existing_games}/{games}), regenerating"
+            )
+            if not dry_run:
+                data_file.unlink(missing_ok=True)
+                pgn_file.unlink(missing_ok=True)
         print(f"[{gen_label}] self-play")
         run_cmd(
             [
