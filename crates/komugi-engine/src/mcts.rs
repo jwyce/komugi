@@ -254,9 +254,12 @@ impl MctsSearcher {
                 .mv
                 .as_ref()
                 .expect("child node must contain a move");
-            working
-                .make_move(mv)
-                .expect("tree child move must stay legal");
+            working.make_move(mv).unwrap_or_else(|err| {
+                panic!(
+                    "tree child move must stay legal: {err:?}; move={mv:?}; fen={}",
+                    working.fen()
+                )
+            });
             node_idx = child_idx;
         }
 
@@ -531,9 +534,12 @@ impl MctsSearcher {
                     .mv
                     .as_ref()
                     .expect("child node must contain a move");
-                working
-                    .make_move(mv)
-                    .expect("tree child move must stay legal");
+                working.make_move(mv).unwrap_or_else(|err| {
+                    panic!(
+                        "tree child move must stay legal: {err:?}; move={mv:?}; fen={}",
+                        working.fen()
+                    )
+                });
                 node_idx = child_idx;
             }
         }
