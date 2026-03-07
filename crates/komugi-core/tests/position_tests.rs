@@ -741,3 +741,35 @@ fn arata_tactician_can_betray_enemy_in_target_tower() {
         "arata betrayal should convert enemy soldier and consume matching hand piece: {fen}"
     );
 }
+
+#[test]
+fn arata_tactician_betrayal_requires_remaining_matching_hand_piece() {
+    let gungi = Gungi::from_fen("4m4/9/9/9/9/9/9/4|t:D|4/4M4 T1/- w 3 - 1").unwrap();
+
+    let moves = gungi.moves();
+
+    let plain_arata_exists = moves.iter().any(|mv| {
+        mv.move_type == MoveType::Arata
+            && mv.piece == PieceType::Tactician
+            && mv.to.square == Square::new_unchecked(8, 5)
+            && mv.captured.is_empty()
+    });
+    let betrayal_arata_exists = moves.iter().any(|mv| {
+        mv.move_type == MoveType::Arata
+            && mv.piece == PieceType::Tactician
+            && mv.to.square == Square::new_unchecked(8, 5)
+            && mv
+                .captured
+                .iter()
+                .any(|piece| piece.piece_type == PieceType::Tactician)
+    });
+
+    assert!(
+        plain_arata_exists,
+        "plain arata tactician move should exist"
+    );
+    assert!(
+        !betrayal_arata_exists,
+        "arata betrayal requiring tactician hand piece should not be generated when drop consumes last tactician"
+    );
+}

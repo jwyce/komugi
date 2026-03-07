@@ -427,7 +427,7 @@ fn generate_all_moves_with_mode(
                 // Matches gungi.js move_gen.ts line 147.
                 if piece.piece_type == PieceType::Tactician {
                     if let Some(tower) = board.get(target_square) {
-                        let betrayal_combos = get_betrayal_combos(*tower, hand, turn);
+                        let betrayal_combos = get_betrayal_combos(*tower, hand, turn, None);
                         for combo in betrayal_combos {
                             let mut mv = Move::new(
                                 turn,
@@ -546,7 +546,14 @@ fn append_arata_moves(
             let next_tier = top.map(|(_, tier)| tier + 1).unwrap_or(1);
             let betrayal_combos = if hand_piece.piece_type == PieceType::Tactician {
                 target_tower
-                    .map(|tower| get_betrayal_combos(tower, ctx.hand, hand_piece.color))
+                    .map(|tower| {
+                        get_betrayal_combos(
+                            tower,
+                            ctx.hand,
+                            hand_piece.color,
+                            Some(hand_piece.piece_type),
+                        )
+                    })
                     .unwrap_or_default()
             } else {
                 arrayvec::ArrayVec::new()
@@ -868,6 +875,7 @@ fn get_betrayal_combos(
     tower: Tower,
     hand: &[HandPiece],
     color: Color,
+    reserved_piece: Option<PieceType>,
 ) -> arrayvec::ArrayVec<arrayvec::ArrayVec<Piece, 3>, 7> {
     let mut enemies = arrayvec::ArrayVec::<Piece, 3>::new();
     for p in tower.iter().filter(|p| p.color != color) {
@@ -885,6 +893,10 @@ fn get_betrayal_combos(
     let mut hand_count = [0u8; 14];
     for hp in hand.iter().filter(|h| h.color == color) {
         hand_count[hp.piece_type as usize] = hp.count;
+    }
+    if let Some(piece_type) = reserved_piece {
+        let idx = piece_type as usize;
+        hand_count[idx] = hand_count[idx].saturating_sub(1);
     }
 
     let mut betrayal_options = arrayvec::ArrayVec::<Piece, 3>::new();
