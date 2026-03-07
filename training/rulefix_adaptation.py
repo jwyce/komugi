@@ -7,6 +7,7 @@ import math
 import os
 import shlex
 import subprocess
+from shutil import copyfileobj
 from pathlib import Path
 
 
@@ -19,6 +20,12 @@ def run_cmd(cmd: list[str], cwd: Path, dry_run: bool) -> None:
     if dry_run:
         return
     subprocess.run(cmd, cwd=cwd, check=True)
+
+
+def append_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with src.open("rb") as in_fh, dst.open("ab") as out_fh:
+        copyfileobj(in_fh, out_fh)
 
 
 def count_pgn_games(pgn_path: Path) -> int:
@@ -55,6 +62,8 @@ def run_adaptation_pass(
     num_blocks: int,
     channels: int,
     dry_run: bool,
+    selfplay_chunk_size: int,
+    selfplay_retry_min_threads: int,
 ) -> tuple[Path, Path]:
     data_file = data_dir / f"{gen_label}.jsonl"
     pgn_file = data_dir / f"{gen_label}.pgn"
@@ -77,27 +86,95 @@ def run_adaptation_pass(
             f"[{gen_label}] reusing existing self-play data: {data_file} ({existing_games}/{games} games in PGN)"
         )
     else:
-        if data_file.exists() or pgn_file.exists():
+        if (data_file.exists() and not pgn_file.exists()) or (
+            pgn_file.exists() and not data_file.exists()
+        ):
             print(
-                f"[{gen_label}] found incomplete self-play artifacts (PGN games: {existing_games}/{games}), regenerating"
+                f"[{gen_label}] self-play artifacts inconsistent, restarting self-play"
             )
             if not dry_run:
                 data_file.unlink(missing_ok=True)
                 pgn_file.unlink(missing_ok=True)
-        print(f"[{gen_label}] self-play")
-        run_cmd(
-            [
-                "selfplay",
-                str(games),
-                str(data_file),
-                str(sims),
-                str(model_in),
-                mode,
-                str(threads),
-            ],
-            cwd=workspace,
-            dry_run=dry_run,
-        )
+            existing_games = 0
+
+        completed_games = existing_games
+        if completed_games > 0:
+            print(
+                f"[{gen_label}] resuming partial self-play from {completed_games}/{games} games"
+            )
+
+        if not data_file.exists() and not dry_run:
+            data_file.touch()
+        if not pgn_file.exists() and not dry_run:
+            pgn_file.touch()
+
+        chunk_size = max(1, selfplay_chunk_size)
+        retry_floor = max(1, selfplay_retry_min_threads)
+
+        while completed_games < games:
+            remaining = games - completed_games
+            chunk_games = min(chunk_size, remaining)
+            chunk_json = (
+                data_dir
+                / f"{gen_label}.chunk{completed_games + 1}_{completed_games + chunk_games}.jsonl"
+            )
+            chunk_pgn = (
+                data_dir
+                / f"{gen_label}.chunk{completed_games + 1}_{completed_games + chunk_games}.pgn"
+            )
+            if not dry_run:
+                chunk_json.unlink(missing_ok=True)
+                chunk_pgn.unlink(missing_ok=True)
+
+            attempt_threads = threads
+            while True:
+                print(
+                    f"[{gen_label}] self-play chunk {completed_games + 1}-{completed_games + chunk_games}/{games} (threads={attempt_threads})"
+                )
+                try:
+                    run_cmd(
+                        [
+                            "selfplay",
+                            str(chunk_games),
+                            str(chunk_json),
+                            str(sims),
+                            str(model_in),
+                            mode,
+                            str(attempt_threads),
+                        ],
+                        cwd=workspace,
+                        dry_run=dry_run,
+                    )
+                    break
+                except subprocess.CalledProcessError as exc:
+                    is_sigsegv = exc.returncode in (-11, 139)
+                    if is_sigsegv and attempt_threads > retry_floor:
+                        next_threads = max(retry_floor, attempt_threads - 32)
+                        print(
+                            f"[{gen_label}] self-play crashed with SIGSEGV at threads={attempt_threads}; retrying chunk with threads={next_threads}"
+                        )
+                        attempt_threads = next_threads
+                        if not dry_run:
+                            chunk_json.unlink(missing_ok=True)
+                            chunk_pgn.unlink(missing_ok=True)
+                        continue
+                    raise
+
+            if dry_run:
+                produced_games = chunk_games
+            else:
+                produced_games = count_pgn_games(chunk_pgn)
+                if produced_games < chunk_games:
+                    raise RuntimeError(
+                        f"Chunk produced only {produced_games}/{chunk_games} games: {chunk_pgn}"
+                    )
+                append_file(chunk_json, data_file)
+                append_file(chunk_pgn, pgn_file)
+                chunk_json.unlink(missing_ok=True)
+                chunk_pgn.unlink(missing_ok=True)
+
+            completed_games += produced_games
+            print(f"[{gen_label}] self-play progress: {completed_games}/{games}")
 
     print(f"[{gen_label}] preprocess")
     run_cmd(
@@ -231,6 +308,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--games-advanced-second-pass", type=int, default=2000)
     parser.add_argument("--sims", type=int, default=400)
     parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
+    parser.add_argument("--selfplay-chunk-size", type=int, default=500)
+    parser.add_argument("--selfplay-retry-min-threads", type=int, default=96)
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -341,6 +420,8 @@ def main() -> None:
                 num_blocks=args.num_blocks,
                 channels=args.channels,
                 dry_run=args.dry_run,
+                selfplay_chunk_size=args.selfplay_chunk_size,
+                selfplay_retry_min_threads=args.selfplay_retry_min_threads,
             )
 
             pass2_model, _ = run_adaptation_pass(
@@ -365,6 +446,8 @@ def main() -> None:
                 num_blocks=args.num_blocks,
                 channels=args.channels,
                 dry_run=args.dry_run,
+                selfplay_chunk_size=args.selfplay_chunk_size,
+                selfplay_retry_min_threads=args.selfplay_retry_min_threads,
             )
 
             final_alias = models_dir / f"{gen_label}.onnx"
@@ -397,6 +480,8 @@ def main() -> None:
                 num_blocks=args.num_blocks,
                 channels=args.channels,
                 dry_run=args.dry_run,
+                selfplay_chunk_size=args.selfplay_chunk_size,
+                selfplay_retry_min_threads=args.selfplay_retry_min_threads,
             )
 
     print("=" * 72)
