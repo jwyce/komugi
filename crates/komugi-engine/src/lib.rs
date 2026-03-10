@@ -4,6 +4,7 @@ pub mod classification;
 pub mod encoding;
 pub mod eval_format;
 pub mod mcts;
+mod mcts_broker;
 #[cfg(feature = "neural")]
 pub mod neural;
 pub mod nnue;
@@ -32,6 +33,8 @@ pub use neural::{GpuBatchPolicy, GpuInferencePool, NeuralPolicy};
 pub use nnue::NnueEval;
 pub use nnue_features::{extract_features, TOTAL_FEATURES};
 pub use nnue_format::{NnueError, NnueParams, QA, QB, SCALE};
-pub use selfplay::{play_game, GameRecord, GameResult, SelfPlayConfig, TrainingRecord};
+pub use selfplay::{
+    play_game, play_games_with_broker, GameRecord, GameResult, SelfPlayConfig, TrainingRecord,
+};
 pub use tt::{Bound, Entry as TTEntry, TranspositionTable};
 pub use win_probability::{accuracy_for_cpl, is_garbage_time, win_percent, win_percent_loss};

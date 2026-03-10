@@ -12,7 +12,7 @@ use komugi_engine::mcts::{HeuristicPolicy, MctsConfig};
 use komugi_engine::neural::GpuInferencePool;
 #[cfg(feature = "neural")]
 use komugi_engine::NeuralPolicy;
-use komugi_engine::{play_game, GameRecord, SelfPlayConfig};
+use komugi_engine::{play_game, play_games_with_broker, GameRecord, SelfPlayConfig};
 
 fn detect_gpu_count() -> usize {
     if let Ok(visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
@@ -156,45 +156,55 @@ fn main() {
     });
 
     #[cfg(not(feature = "neural"))]
-    let gpu_pool: Option<Arc<()>> = None;
+    let _gpu_pool: Option<Arc<()>> = None;
 
     let model_path_owned = model_path.map(String::from);
-    let completed = Arc::new(Mutex::new(0u32));
-    let results: Arc<Mutex<Vec<(u32, GameRecord)>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(num_games as usize)));
-
     eprintln!(
         "Generating {num_games} games ({mode:?}) with {simulations} sims on {num_threads} threads..."
     );
 
-    let handles: Vec<_> = (0..num_threads)
-        .map(|thread_id| {
-            let model_path = model_path_owned.clone();
-            let completed = Arc::clone(&completed);
-            let results = Arc::clone(&results);
-            #[cfg(feature = "neural")]
-            let gpu_pool = gpu_pool.clone();
+    let policy: Arc<dyn Policy> = {
+        #[cfg(feature = "neural")]
+        {
+            if let Some(ref pool) = gpu_pool {
+                Arc::new(pool.policy())
+            } else if let Some(ref path) = model_path_owned {
+                Arc::new(NeuralPolicy::from_file(path).expect("failed to load model"))
+            } else {
+                Arc::new(HeuristicPolicy)
+            }
+        }
+        #[cfg(not(feature = "neural"))]
+        {
+            let _ = &model_path_owned;
+            Arc::new(HeuristicPolicy)
+        }
+    };
 
-            thread::spawn(move || {
-                let policy: Arc<dyn Policy> = {
-                    #[cfg(feature = "neural")]
-                    {
-                        if let Some(ref pool) = gpu_pool {
-                            Arc::new(pool.policy())
-                        } else if let Some(ref path) = model_path {
-                            Arc::new(NeuralPolicy::from_file(path).expect("failed to load model"))
-                        } else {
-                            Arc::new(HeuristicPolicy)
-                        }
-                    }
-                    #[cfg(not(feature = "neural"))]
-                    {
-                        let _ = &model_path;
-                        Arc::new(HeuristicPolicy)
-                    }
+    let config = SelfPlayConfig {
+        mcts_config,
+        setup_mode: mode,
+        max_moves,
+        policy,
+    };
+
+    let mut all_results = if mcts_config.vl_batch_size <= 1 {
+        let completed = Arc::new(Mutex::new(0u32));
+        let results: Arc<Mutex<Vec<(u32, GameRecord)>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(num_games as usize)));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let completed = Arc::clone(&completed);
+                let results = Arc::clone(&results);
+                let config = SelfPlayConfig {
+                    mcts_config,
+                    setup_mode: mode,
+                    max_moves,
+                    policy: Arc::clone(&config.policy),
                 };
 
-                loop {
+                thread::spawn(move || loop {
                     let game_num = {
                         let mut c = completed.lock().unwrap();
                         if *c >= num_games {
@@ -204,13 +214,6 @@ fn main() {
                         *c
                     };
 
-                    let config = SelfPlayConfig {
-                        mcts_config,
-                        setup_mode: mode,
-                        max_moves,
-                        policy: Arc::clone(&policy),
-                    };
-
                     let record = play_game(&config);
                     eprintln!(
                         "[t{thread_id}] Game {game_num}/{num_games}: {} moves, {:?}",
@@ -218,16 +221,19 @@ fn main() {
                     );
 
                     results.lock().unwrap().push((game_num, record));
-                }
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    for handle in handles {
-        handle.join().expect("thread panicked");
-    }
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
 
-    let mut all_results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+        Arc::try_unwrap(results).unwrap().into_inner().unwrap()
+    } else {
+        play_games_with_broker(&config, num_games, num_threads)
+    };
+
     all_results.sort_by_key(|(num, _)| *num);
 
     let mut file = std::fs::File::create(output_file).expect("failed to create output file");
