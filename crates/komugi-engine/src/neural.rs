@@ -345,12 +345,11 @@ impl GpuInferencePool {
         for gpu_id in 0..num_gpus {
             for worker_idx in 0..cfg.workers_per_gpu {
                 let session = Session::builder()?
-                    .with_intra_threads(1)?
-                    .with_inter_threads(1)?
                     .with_execution_providers([CUDAExecutionProvider::default()
                         .with_device_id(gpu_id as i32)
                         .build()])?
                     .commit_from_file(model_path)?;
+
                 let (tx, rx) = mpsc::sync_channel(cfg.queue_capacity);
                 let worker_cfg = cfg;
                 thread::Builder::new()
