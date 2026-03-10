@@ -1,6 +1,9 @@
-use komugi_core::{Color, Position, SearchLimits, SetupMode, SQUARES};
+use std::sync::{Arc, Mutex};
+
+use komugi_core::{Color, Move, Policy, Position, SearchLimits, SetupMode, SQUARES};
 use komugi_engine::{
-    mcts::HeuristicPolicy, play_game, MctsConfig, MctsSearcher, SelfPlayConfig, ENCODING_SIZE,
+    mcts::HeuristicPolicy, play_game, play_games_with_broker, MctsConfig, MctsSearcher,
+    SelfPlayConfig, ENCODING_SIZE,
 };
 
 #[test]
@@ -41,6 +44,8 @@ fn mcts_finds_winning_capture() {
 
     let mut searcher = MctsSearcher::new(MctsConfig {
         max_simulations: 1000,
+        dirichlet_epsilon: 0.0,
+        temperature: 0.0,
         ..MctsConfig::default()
     });
 
@@ -95,8 +100,35 @@ fn count_pieces(position: &Position, color: Color) -> usize {
     pieces
 }
 
-#[test]
-fn vl_batch_mcts_returns_move_in_draft_game396() {
+#[derive(Clone, Default)]
+struct RecordingHeuristicPolicy {
+    batch_sizes: Arc<Mutex<Vec<usize>>>,
+}
+
+impl RecordingHeuristicPolicy {
+    fn batch_sizes(&self) -> Vec<usize> {
+        self.batch_sizes.lock().unwrap().clone()
+    }
+}
+
+impl Policy for RecordingHeuristicPolicy {
+    fn prior(&self, position: &Position, moves: &[Move]) -> Vec<f32> {
+        HeuristicPolicy.prior(position, moves)
+    }
+
+    fn prior_and_value_batch(
+        &self,
+        batch: &[(&Position, &[Move])],
+    ) -> Vec<(Vec<f32>, Option<f32>)> {
+        self.batch_sizes.lock().unwrap().push(batch.len());
+        batch
+            .iter()
+            .map(|(position, moves)| (HeuristicPolicy.prior(position, moves), None))
+            .collect()
+    }
+}
+
+fn draft_game396_position() -> Position {
     use komugi_core::{MoveType, PieceType, Square};
 
     let mut position = Position::new(SetupMode::Intermediate);
@@ -140,6 +172,12 @@ fn vl_batch_mcts_returns_move_in_draft_game396() {
 
     assert!(position.in_draft());
     assert_eq!(position.turn, Color::Black);
+    position
+}
+
+#[test]
+fn vl_batch_mcts_returns_move_in_draft_game396() {
+    let position = draft_game396_position();
     let legal_moves = position.moves();
     assert!(
         legal_moves.len() > 100,
@@ -165,6 +203,57 @@ fn vl_batch_mcts_returns_move_in_draft_game396() {
         result.nodes_searched >= 100,
         "Should complete many simulations"
     );
+}
+
+#[test]
+fn vl_batch_mcts_retries_frontier_after_collision_start() {
+    let position = draft_game396_position();
+    let policy = RecordingHeuristicPolicy::default();
+    let mut searcher = MctsSearcher::new(MctsConfig {
+        max_simulations: 24,
+        vl_batch_size: 8,
+        dirichlet_epsilon: 0.0,
+        temperature: 0.0,
+        ..MctsConfig::default()
+    });
+
+    let result = searcher.search_with_policy(&position, SearchLimits::default(), &policy);
+    let batch_sizes = policy.batch_sizes();
+
+    assert_eq!(result.nodes_searched, 24);
+    assert_eq!(batch_sizes.first().copied(), Some(1));
+    assert!(
+        batch_sizes.get(1).copied().unwrap_or_default() >= 3,
+        "Expected retries to recover multiple pending leaves after the collision-heavy opening batch, got {:?}",
+        batch_sizes,
+    );
+    assert!(
+        batch_sizes.iter().any(|&batch_size| batch_size == 8),
+        "Expected at least one full VL batch after the frontier widens, got {:?}",
+        batch_sizes,
+    );
+}
+
+#[test]
+fn vl_batch_mcts_collision_heavy_search_still_returns_legal_move() {
+    let position = draft_game396_position();
+    let legal_moves = position.moves();
+    let policy = RecordingHeuristicPolicy::default();
+    let mut searcher = MctsSearcher::new(MctsConfig {
+        max_simulations: 24,
+        vl_batch_size: 8,
+        dirichlet_epsilon: 0.0,
+        temperature: 0.0,
+        ..MctsConfig::default()
+    });
+
+    let result = searcher.search_with_policy(&position, SearchLimits::default(), &policy);
+
+    let best_move = result
+        .best_move
+        .expect("VL-batched MCTS should still return a move after repeated collisions");
+    assert!(legal_moves.iter().any(|mv| mv == &best_move));
+    assert_eq!(result.nodes_searched, 24);
 }
 
 #[test]
@@ -195,4 +284,56 @@ fn vl_batch_selfplay_intermediate_no_draft_draws() {
             }
         }
     }
+}
+
+#[test]
+fn broker_runtime_advances_multiple_games_stepwise() {
+    let config = SelfPlayConfig {
+        mcts_config: MctsConfig {
+            max_simulations: 32,
+            vl_batch_size: 8,
+            ..MctsConfig::default()
+        },
+        setup_mode: SetupMode::Beginner,
+        max_moves: 12,
+        policy: Arc::new(HeuristicPolicy),
+    };
+
+    let games = play_games_with_broker(&config, 4, 2);
+    assert_eq!(games.len(), 4);
+    assert_eq!(games[0].0, 1);
+    assert_eq!(games[1].0, 2);
+    assert_eq!(games[2].0, 3);
+    assert_eq!(games[3].0, 4);
+    assert!(games.iter().any(|(_, game)| game.total_moves > 0));
+    assert!(games.iter().all(|(_, game)| game.total_moves <= 12));
+}
+
+#[test]
+fn broker_runtime_preserves_full_vl_batches() {
+    let policy = RecordingHeuristicPolicy::default();
+    let config = SelfPlayConfig {
+        mcts_config: MctsConfig {
+            max_simulations: 24,
+            vl_batch_size: 8,
+            dirichlet_epsilon: 0.0,
+            temperature: 0.0,
+            ..MctsConfig::default()
+        },
+        setup_mode: SetupMode::Intermediate,
+        max_moves: 4,
+        policy: Arc::new(policy.clone()),
+    };
+
+    let games = play_games_with_broker(&config, 3, 2);
+    let batch_sizes = policy.batch_sizes();
+
+    assert_eq!(games.len(), 3);
+    assert!(games.iter().all(|(_, game)| !game.positions.is_empty()));
+    assert!(games.iter().all(|(_, game)| game.total_moves <= 4));
+    assert!(
+        batch_sizes.iter().any(|&batch_size| batch_size == 8),
+        "Broker self-play should keep hitting full VL batches, got {:?}",
+        batch_sizes,
+    );
 }
