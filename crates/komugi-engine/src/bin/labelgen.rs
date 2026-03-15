@@ -12,7 +12,7 @@ use komugi_engine::mcts::{HeuristicPolicy, MctsConfig, MctsSearcher};
 use komugi_engine::neural::GpuInferencePool;
 #[cfg(feature = "neural")]
 use komugi_engine::NeuralPolicy;
-use komugi_engine::{play_game, SelfPlayConfig};
+use komugi_engine::{play_game, SelfPlayConfig, TrainingRecord};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,17 +99,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|n| n.get())
             .unwrap_or(4)
     });
+    let selfplay_input = parse_model_arg(args.get(8));
 
     let max_moves: u32 = std::env::var("KOMUGI_MAX_MOVES")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
+    let vl_batch: u32 = std::env::var("KOMUGI_VL_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     let play_config = MctsConfig {
         max_simulations: play_sims,
+        vl_batch_size: vl_batch,
         ..Default::default()
     };
     let eval_config = MctsConfig {
         max_simulations: eval_sims,
+        vl_batch_size: vl_batch,
         ..Default::default()
     };
 
@@ -137,115 +144,146 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("Model path provided but neural feature is disabled; using heuristic policy");
     }
 
-    eprintln!(
-        "Phase 1: generating {num_games} games ({mode:?}) with {play_sims} sims on {num_threads} threads"
-    );
-
     let phase1_path = format!("{output_file}.phase1.tmp.jsonl");
-    let phase1_file = File::create(&phase1_path)?;
-    let (phase1_tx, phase1_rx) = channel::bounded::<Phase1Record>(4096);
-
-    let phase1_writer = thread::spawn(move || -> Result<u64, String> {
+    let total_positions = if let Some(input_path) = selfplay_input.as_deref() {
+        eprintln!("Phase 1: ingesting existing selfplay JSONL from {input_path}");
+        let input_file = File::open(input_path)?;
+        let phase1_file = File::create(&phase1_path)?;
         let mut writer = BufWriter::new(phase1_file);
         let mut count = 0u64;
-        for record in phase1_rx {
-            serde_json::to_writer(&mut writer, &record).map_err(|e| e.to_string())?;
-            writer.write_all(b"\n").map_err(|e| e.to_string())?;
+
+        for line in BufReader::new(input_file).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let rec: TrainingRecord = serde_json::from_str(&line)?;
+            let phase1 = Phase1Record {
+                fen: rec.fen,
+                outcome: rec.outcome,
+                move_number: rec.move_number,
+            };
+            serde_json::to_writer(&mut writer, &phase1)?;
+            writer.write_all(b"\n")?;
             count = count.saturating_add(1);
             if count % 10_000 == 0 {
-                eprintln!("Phase 1 positions: {count}");
+                eprintln!("Phase 1 positions (from selfplay): {count}");
             }
         }
-        writer.flush().map_err(|e| e.to_string())?;
-        Ok(count)
-    });
+        writer.flush()?;
+        eprintln!("Phase 1 complete (from selfplay): {count} positions in {phase1_path}");
+        count
+    } else {
+        eprintln!(
+            "Phase 1: generating {num_games} games ({mode:?}) with {play_sims} sims on {num_threads} threads"
+        );
 
-    let games_done = Arc::new(Mutex::new(0u32));
-    let model_path_owned = model_path.clone();
+        let phase1_file = File::create(&phase1_path)?;
+        let (phase1_tx, phase1_rx) = channel::bounded::<Phase1Record>(4096);
 
-    let phase1_handles: Vec<_> = (0..num_threads)
-        .map(|thread_id| {
-            let games_done = Arc::clone(&games_done);
-            let phase1_tx = phase1_tx.clone();
-            let model_path = model_path_owned.clone();
-            #[cfg(feature = "neural")]
-            let gpu_pool = gpu_pool.clone();
+        let phase1_writer = thread::spawn(move || -> Result<u64, String> {
+            let mut writer = BufWriter::new(phase1_file);
+            let mut count = 0u64;
+            for record in phase1_rx {
+                serde_json::to_writer(&mut writer, &record).map_err(|e| e.to_string())?;
+                writer.write_all(b"\n").map_err(|e| e.to_string())?;
+                count = count.saturating_add(1);
+                if count % 10_000 == 0 {
+                    eprintln!("Phase 1 positions: {count}");
+                }
+            }
+            writer.flush().map_err(|e| e.to_string())?;
+            Ok(count)
+        });
 
-            thread::spawn(move || {
-                let policy: Arc<dyn Policy> = {
-                    #[cfg(feature = "neural")]
-                    {
-                        if let Some(ref pool) = gpu_pool {
-                            Arc::new(pool.policy())
-                        } else if let Some(ref path) = model_path {
-                            Arc::new(
-                                NeuralPolicy::from_file(path)
-                                    .expect("failed to load model for phase 1"),
-                            )
-                        } else {
+        let games_done = Arc::new(Mutex::new(0u32));
+        let model_path_owned = model_path.clone();
+
+        let phase1_handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let games_done = Arc::clone(&games_done);
+                let phase1_tx = phase1_tx.clone();
+                let model_path = model_path_owned.clone();
+                #[cfg(feature = "neural")]
+                let gpu_pool = gpu_pool.clone();
+
+                thread::spawn(move || {
+                    let policy: Arc<dyn Policy> = {
+                        #[cfg(feature = "neural")]
+                        {
+                            if let Some(ref pool) = gpu_pool {
+                                Arc::new(pool.policy())
+                            } else if let Some(ref path) = model_path {
+                                Arc::new(
+                                    NeuralPolicy::from_file(path)
+                                        .expect("failed to load model for phase 1"),
+                                )
+                            } else {
+                                Arc::new(HeuristicPolicy)
+                            }
+                        }
+                        #[cfg(not(feature = "neural"))]
+                        {
+                            let _ = &model_path;
                             Arc::new(HeuristicPolicy)
                         }
-                    }
-                    #[cfg(not(feature = "neural"))]
-                    {
-                        let _ = &model_path;
-                        Arc::new(HeuristicPolicy)
-                    }
-                };
-
-                loop {
-                    let game_num = {
-                        let mut g = games_done.lock().expect("failed to lock game counter");
-                        if *g >= num_games {
-                            break;
-                        }
-                        *g += 1;
-                        *g
                     };
 
-                    let config = SelfPlayConfig {
-                        mcts_config: play_config,
-                        setup_mode: mode,
-                        max_moves,
-                        policy: Arc::clone(&policy),
-                    };
+                    loop {
+                        let game_num = {
+                            let mut g = games_done.lock().expect("failed to lock game counter");
+                            if *g >= num_games {
+                                break;
+                            }
+                            *g += 1;
+                            *g
+                        };
 
-                    let record = play_game(&config);
-                    for pos in record.positions {
-                        if phase1_tx
-                            .send(Phase1Record {
-                                fen: pos.fen,
-                                outcome: pos.outcome,
-                                move_number: pos.move_number,
-                            })
-                            .is_err()
-                        {
-                            return;
+                        let config = SelfPlayConfig {
+                            mcts_config: play_config,
+                            setup_mode: mode,
+                            max_moves,
+                            policy: Arc::clone(&policy),
+                        };
+
+                        let record = play_game(&config);
+                        for pos in record.positions {
+                            if phase1_tx
+                                .send(Phase1Record {
+                                    fen: pos.fen,
+                                    outcome: pos.outcome,
+                                    move_number: pos.move_number,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
-                    }
 
-                    eprintln!(
-                        "[p1 t{thread_id}] game {game_num}/{num_games}: {} moves, {:?}",
-                        record.total_moves, record.result
-                    );
-                }
+                        eprintln!(
+                            "[p1 t{thread_id}] game {game_num}/{num_games}: {} moves, {:?}",
+                            record.total_moves, record.result
+                        );
+                    }
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    drop(phase1_tx);
-    for handle in phase1_handles {
-        handle
+        drop(phase1_tx);
+        for handle in phase1_handles {
+            handle
+                .join()
+                .map_err(|_| "phase 1 worker thread panicked")?;
+        }
+
+        let total_positions = phase1_writer
             .join()
-            .map_err(|_| "phase 1 worker thread panicked")?;
-    }
+            .map_err(|_| "phase 1 writer thread panicked")?
+            .map_err(|e| format!("phase 1 writer failed: {e}"))?;
 
-    let total_positions = phase1_writer
-        .join()
-        .map_err(|_| "phase 1 writer thread panicked")?
-        .map_err(|e| format!("phase 1 writer failed: {e}"))?;
-
-    eprintln!("Phase 1 complete: {total_positions} positions in {phase1_path}");
+        eprintln!("Phase 1 complete: {total_positions} positions in {phase1_path}");
+        total_positions
+    };
 
     eprintln!(
         "Phase 2: re-evaluating {total_positions} positions with {eval_sims} sims on {num_threads} threads"
