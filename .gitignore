@@ -25,3 +25,8 @@ BENCHMARK_BASELINES.md
 
 # OS
 .DS_Store
+
+# Local ad-hoc binary builds
+/builds/
+/labelgen.linux.amd64
+/labelgen.linux.amd64.vlfix

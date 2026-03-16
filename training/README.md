@@ -132,3 +132,44 @@ Useful filters:
 - `--min-move-number 10` to skip opening noise
 - `--no-drop` or `--no-capture` to bias puzzle types
 - `--allow-other` to include non-capture/non-drop tactical moves
+
+## Puzzle Stage-2 Verification (Multi-Move)
+
+Stage-1 (`generate_puzzles.py`) finds strong single-position candidates. Stage-2 verifies
+continuation lines against best defense and buckets puzzles into `easy` / `medium` / `hard`
+using target line length and move-uniqueness thresholds.
+
+### Build verifier binary
+
+```bash
+cargo build --release -p komugi-engine --bin puzzle_verify
+```
+
+### Verify Stage-1 candidates
+
+```bash
+./target/release/puzzle_verify \
+  --input /workspace/data/puzzles_seed_50k.jsonl \
+  --output-prefix /workspace/data/puzzles_stage2 \
+  --depth 4 \
+  --num-pv 3 \
+  --easy-min-ply 1 \
+  --easy-max-ply 3 \
+  --medium-min-ply 5 \
+  --medium-max-ply 11 \
+  --hard-min-ply 13 \
+  --hard-max-ply 19
+```
+
+Outputs:
+
+- `/workspace/data/puzzles_stage2_all.jsonl`
+- `/workspace/data/puzzles_stage2_easy.jsonl`
+- `/workspace/data/puzzles_stage2_medium.jsonl`
+- `/workspace/data/puzzles_stage2_hard.jsonl`
+
+Notes:
+
+- `--easy/medium/hard-min/max-ply` control verified line length ranges (in plies).
+- `--depth` and `--num-pv` trade quality vs runtime.
+- Increase strictness with `--*-attacker-gap` and `--*-min-final-eval`.
