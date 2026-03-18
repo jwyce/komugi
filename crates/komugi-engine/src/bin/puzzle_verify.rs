@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
 use komugi_core::{move_to_san, Color, Position, SearchLimits};
-use komugi_engine::{AlphaBetaConfig, AlphaBetaSearcher};
+use komugi_engine::{AlphaBetaConfig, AlphaBetaSearcher, NnueEval};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,6 +11,7 @@ use serde_json::Value;
 struct Config {
     input: String,
     output_prefix: String,
+    nnue: Option<String>,
     depth: u8,
     num_pv: usize,
     max_candidates: Option<usize>,
@@ -91,6 +92,7 @@ fn parse_config_from_args(args: &[String]) -> Result<Config, String> {
     let mut cfg = Config {
         input: String::new(),
         output_prefix: String::from("puzzles_stage2"),
+        nnue: None,
         depth: 4,
         num_pv: 3,
         max_candidates: None,
@@ -115,6 +117,7 @@ fn parse_config_from_args(args: &[String]) -> Result<Config, String> {
             "--output-prefix" => {
                 cfg.output_prefix = parse_string_arg(args, &mut i, "--output-prefix")?
             }
+            "--nnue" => cfg.nnue = Some(parse_string_arg(args, &mut i, "--nnue")?),
             "--depth" => cfg.depth = parse_arg(args, &mut i, "--depth")?,
             "--num-pv" => cfg.num_pv = parse_arg(args, &mut i, "--num-pv")?,
             "--max-candidates" => {
@@ -164,6 +167,7 @@ fn parse_config_from_args(args: &[String]) -> Result<Config, String> {
                     "Usage: puzzle_verify --input <stage1.jsonl> [options]\n\n\
 Options:\n\
   --output-prefix <path>         Output prefix (default: puzzles_stage2)\n\
+  --nnue <path>                  Optional .nnue file to use NNUE eval\n\
   --depth <n>                    Search depth (default: 4)\n\
   --num-pv <n>                   Multi-PV count (default: 3)\n\
   --max-candidates <n>           Stop after N input records\n\
@@ -354,7 +358,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     ];
 
-    let mut searcher = AlphaBetaSearcher::new(AlphaBetaConfig::default());
+    let mut searcher = if let Some(path) = &cfg.nnue {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("failed to read nnue file '{path}': {e}"))?;
+        let nnue = NnueEval::from_bytes(&bytes)
+            .map_err(|e| format!("failed to parse nnue file '{path}': {e:?}"))?;
+        AlphaBetaSearcher::with_eval(AlphaBetaConfig::default(), Box::new(nnue))
+    } else {
+        AlphaBetaSearcher::new(AlphaBetaConfig::default())
+    };
 
     let mut scanned = 0usize;
     let mut parse_errors = 0usize;
@@ -471,6 +483,7 @@ mod tests {
         let args = vec_args(&["puzzle_verify", "--input", "seed.jsonl"]);
         let cfg = parse_config_from_args(&args).expect("config should parse");
         assert_eq!(cfg.input, "seed.jsonl");
+        assert_eq!(cfg.nnue, None);
         assert_eq!(cfg.depth, 4);
         assert_eq!(cfg.num_pv, 3);
         assert_eq!(cfg.easy_min_ply, 1);
@@ -501,6 +514,22 @@ mod tests {
         assert_eq!(cfg.medium_max_ply, 7);
         assert_eq!(cfg.hard_min_ply, 15);
         assert_eq!(cfg.hard_max_ply, 15);
+    }
+
+    #[test]
+    fn parse_nnue_flag() {
+        let args = vec_args(&[
+            "puzzle_verify",
+            "--input",
+            "seed.jsonl",
+            "--nnue",
+            "/workspace/models/komugi_rulefix.nnue",
+        ]);
+        let cfg = parse_config_from_args(&args).expect("config should parse");
+        assert_eq!(
+            cfg.nnue,
+            Some("/workspace/models/komugi_rulefix.nnue".to_string())
+        );
     }
 
     #[test]
