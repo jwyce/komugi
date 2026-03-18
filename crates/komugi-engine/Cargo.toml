@@ -18,7 +18,7 @@ serde_json = "1"
 ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "load-dynamic"], optional = true }
 ndarray = { version = "0.16", optional = true }
 
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
+[target.'cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))'.dependencies]
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
